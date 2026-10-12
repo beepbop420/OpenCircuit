@@ -399,6 +399,11 @@ struct StrapWorkoutHooks: ViewModifier {
     @Binding var show: Bool
     let onWorkoutsChanged: () -> Void
 
+    /// The alert's answers, order-free (#296).
+    private var recoveryAlert: StrapRecoveryAlert {
+        StrapRecoveryAlert(recorder: recorder, onSaved: onWorkoutsChanged)
+    }
+
     func body(content: Content) -> some View {
         content
             // One app-lifetime observer handles either active device; it pauses locally and asks
@@ -421,16 +426,12 @@ struct StrapWorkoutHooks: ViewModifier {
                 StrapWorkoutView(recorder: recorder, session: session)
             }
             .alert("Interrupted workout", isPresented: Binding(
-                get: { recorder.recoverable != nil },
-                set: { if !$0 { recorder.postponeRecovered() } })
+                get: { recoveryAlert.isPresented },
+                set: { recoveryAlert.setPresented($0) })
             ) {
-                Button("Save to Health") {
-                    Task {
-                        if await recorder.saveRecovered() { onWorkoutsChanged() }
-                    }
-                }
-                Button("Discard", role: .destructive) { recorder.discardRecovered() }
-                Button("Not Now", role: .cancel) { recorder.postponeRecovered() }
+                Button("Save to Health") { recoveryAlert.save() }
+                Button("Discard", role: .destructive) { recoveryAlert.discard() }
+                Button("Not Now", role: .cancel) { recoveryAlert.notNow() }
             } message: {
                 if let recovered = recorder.recoverable { Text(Self.message(recovered)) }
             }
