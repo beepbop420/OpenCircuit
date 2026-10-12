@@ -42,7 +42,7 @@ final class CaloriesCardHostedTests: XCTestCase {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
 
-    private func todayList(showProfile: Bool = false) throws -> some View {
+    private func todayList() throws -> some View {
         let container = try ModelContainer(
             for: Schema([StoredSample.self, StoredDaily.self, StoredSleepSummary.self, StoredStepSample.self]),
             configurations: ModelConfiguration(isStoredInMemoryOnly: true))
@@ -50,7 +50,7 @@ final class CaloriesCardHostedTests: XCTestCase {
         return NavigationStack {
             List {
                 Group {
-                    OCCard { CaloriesCardView(startWithProfileSheet: showProfile) }
+                    OCCard { CaloriesCardView() }
                 }
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -68,12 +68,23 @@ final class CaloriesCardHostedTests: XCTestCase {
         XCTAssertNotEqual(selectable, true, "a link inside the card made the whole row selectable")
     }
 
-    /// The button only sets `showProfile`; the accessibility tree is empty under a unit-test host, so
-    /// the sheet is driven through the card's `startWithProfileSheet` seed instead of a synthesized tap.
-    func testProfileSheetPresentsFromTheCardWithoutPushing() throws {
-        let (_, vc) = host(try todayList(showProfile: true))
+    /// A real activation of "Set Up Profile" presents the Profile sheet and does NOT push: the
+    /// button is a `Button`, never a `NavigationLink`, so the navigation stack stays at one controller.
+    func testSetUpProfileButtonPresentsTheSheetWithoutPushing() throws {
+        AccessibilityTestSupport.enableAutomation()
+        let (window, vc) = host(try todayList())
+        XCTAssertNil(vc.presentedViewController)
+        let found = AccessibilityTestSupport.activate(label: "Set Up Profile", in: vc.view)
+        XCTAssertTrue(found, "no activatable Set Up Profile element; labels: \(AccessibilityTestSupport.labels(in: vc.view))")
         pump(1.0)
-        XCTAssertNotNil(vc.presentedViewController, "the Profile sheet did not present")
+        XCTAssertNotNil(vc.presentedViewController, "activating Set Up Profile did not present the sheet")
+        let nav = descendantViewControllers(of: vc).compactMap { $0 as? UINavigationController }.first
+        XCTAssertEqual(nav?.viewControllers.count, 1, "Set Up Profile pushed instead of presenting")
+        withExtendedLifetime(window) {}
+    }
+
+    private func descendantViewControllers(of vc: UIViewController) -> [UIViewController] {
+        [vc] + vc.children.flatMap { descendantViewControllers(of: $0) }
     }
 
     // MARK: Stage legend at the narrowest phone

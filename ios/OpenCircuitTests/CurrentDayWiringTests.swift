@@ -44,8 +44,11 @@ final class CurrentDayWiringTests: XCTestCase {
         let vc = UIHostingController(rootView: AnyView(root.environment(\.dayClock, dayClock)))
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = vc
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene { window.windowScene = scene }
         window.makeKeyAndVisible()
+        vc.view.layoutIfNeeded()
         spin()
+        vc.view.layoutIfNeeded()
         return (window, vc)
     }
 
@@ -157,22 +160,49 @@ final class CurrentDayWiringTests: XCTestCase {
         withExtendedLifetime(window) {}
     }
 
-    /// The Profile sheet lives on the wrapper, outside the re-keyed content, so a day change must
-    /// neither dismiss it nor lose it (the user may be mid-edit).
-    func testProfileSheetStaysPresentedWhileTheCaloriesDayMoves() throws {
+    /// The Today row the card sits in, so activation behaves as in the app.
+    private func todayList(_ container: ModelContainer) -> some View {
+        NavigationStack {
+            List {
+                Group { OCCard { CaloriesCardView() } }
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+        }
+        .modelContainer(container)
+    }
+
+    /// Opens a Calories-card sheet with a REAL activation of its button, crosses midnight, and
+    /// asserts it is the very same presentation (`===`, not merely "something is presented": a sheet
+    /// whose state was rebuilt under the new key re-presents as a different controller).
+    private func assertSheetSurvivesTheDayChange(opening label: String) throws {
+        UserDefaults.standard.removeObject(forKey: "userProfile.age")  // defaults present: the button shows
+        AccessibilityTestSupport.enableAutomation()
         let clock = Clock(at(4, 23, 55)), builds = Builds()
-        let c = try container()
-        let (window, vc) = host(NavigationStack { CaloriesCardView(startWithProfileSheet: true) }.modelContainer(c),
-                                clock: clock, builds: builds)
+        let (window, vc) = host(todayList(try container()), clock: clock, builds: builds)
+        spin(0.5)
+        XCTAssertTrue(AccessibilityTestSupport.activate(label: label, in: vc.view),
+                      "no activatable \(label) element; labels: \(AccessibilityTestSupport.labels(in: vc.view))")
         spin(1.0)
-        let sheetBefore = try XCTUnwrap(vc.presentedViewController, "the Profile sheet did not present")
+        let sheetBefore = try XCTUnwrap(vc.presentedViewController, "\(label) did not present a sheet")
         crossMidnight(clock, to: at(5, 0, 2))
         spin(1.0)
         XCTAssertEqual(changes.days("calories"), [at(5, 0)], "the day moved")
         XCTAssertEqual(builds.days("calories"), [at(4, 0), at(5, 0)], "and the body was rebuilt")
         XCTAssertTrue(vc.presentedViewController === sheetBefore,
-                      "a day change dismissed or re-presented the Profile sheet")
+                      "a day change dismissed or re-presented the sheet opened by \(label)")
         withExtendedLifetime(window) {}
+    }
+
+    /// The Profile sheet lives on the wrapper, outside the re-keyed content, so a day change must
+    /// neither dismiss it nor lose it (the user may be mid-edit).
+    func testProfileSheetStaysPresentedWhileTheCaloriesDayMoves() throws {
+        try assertSheetSurvivesTheDayChange(opening: "Set Up Profile")
+    }
+
+    func testEstimateInfoSheetStaysPresentedWhileTheCaloriesDayMoves() throws {
+        try assertSheetSurvivesTheDayChange(opening: "How These Are Estimated")
     }
 
     func testHeadacheSignalsFollowsTheDayWithoutBeingRekeyed() throws {

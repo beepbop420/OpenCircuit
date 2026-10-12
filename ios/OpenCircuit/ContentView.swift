@@ -2760,12 +2760,7 @@ private struct QuickLoggedHeadache: Identifiable {
 /// is handed the two actions that present them.
 struct CaloriesCardView: View {
     @State private var showEstimateInfo = false
-    @State private var showProfile: Bool
-
-    /// `startWithProfileSheet` seeds the Set Up Profile sheet open; tests only (call sites use `init()`).
-    init(startWithProfileSheet: Bool = false) {
-        _showProfile = State(initialValue: startWithProfileSheet)
-    }
+    @State private var showProfile = false
 
     var body: some View {
         CurrentDayView("calories") {
