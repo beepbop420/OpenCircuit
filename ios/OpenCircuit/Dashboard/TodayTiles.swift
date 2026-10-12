@@ -12,7 +12,9 @@
 //   HRV / SpO₂ / resp. rate — the OVERNIGHT average (`sleep*Avg`): the night is the one window the
 //     ring samples consistently, so nights compare like-for-like; daytime values depend on activity.
 //   Skin temp — the nightly value stored on the sleep summary (the Vitals Status source).
-//   Resting HR — `RestingHR.dailyValues` over the window's HR (the Vitals Status derivation).
+//   Resting HR — `RestingHR.dailyValues` over the window's HR (the Vitals Status derivation). A day
+//     below `RestingHR.dayCoverage` has no value (#298), so before today has enough readings the
+//     headline is the last day that has one, labelled with that day ("yesterday", "as of Mon 28").
 //   Steps — today's running total as the headline; the TREND compares the last COMPLETE day, since
 //     a partial day would always read "below usual" before evening. Its verdict is stated only when
 //     that day is yesterday (`statedTrend`).

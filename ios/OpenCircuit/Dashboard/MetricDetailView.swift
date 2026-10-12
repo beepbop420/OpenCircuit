@@ -176,7 +176,7 @@ struct MetricDetailView: View {
     static func what(_ m: TodayTile.Metric) -> String {
         switch m {
         case .hrv:             return "The average of your device's heart-rate-variability readings while you slept, one value per night."
-        case .restingHR:       return "A daily resting heart rate: the day's lowest sustained heart rate (or its lowest reading when readings are sparse), the same estimate Vitals Status uses."
+        case .restingHR:       return "A daily resting heart rate: the day's lowest sustained heart rate (or its lowest reading when readings are sparse), the same estimate Vitals Status uses. A day with fewer than \(RestingHR.dayCoverage.minReadings) readings, or less than \(Int(RestingHR.dayCoverage.minSpan / 3600)) hours of them, has no value; until today has enough, this shows the last day that does."
         case .spo2:            return "The average of your device's blood-oxygen readings while you slept, one value per night."
         case .respiratoryRate: return "The average of your device's breathing-rate readings while you slept, one value per night."
         case .skinTemp:        return "Your device's skin temperature for each night. Skin temperature runs below core body temperature; what matters is the change from your usual."

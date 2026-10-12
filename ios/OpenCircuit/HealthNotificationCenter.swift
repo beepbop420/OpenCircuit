@@ -497,16 +497,18 @@ struct HealthNotificationCenter {
     /// a pass — `StoredSample` has no index on `start`, so a ~30-day scan runs on the main actor
     /// several times an hour and paying for it twice is not affordable on a bounded background wake.
     ///
-    /// Byte-identical to the inline version it replaces: same window (`maxBaselineDays + 2` days
-    /// back from `Date()` — deliberately NOT the caller's `now`, unchanged), same
-    /// `recentSamples(kind: .heartRate,)` fetch and try?-to-empty fallback, same `HRSample` mapping,
-    /// same `RestingHR.dailyValues` defaults, same ascending sort.
+    /// Same window (`maxBaselineDays + 2` days back from `Date()` — deliberately NOT the caller's
+    /// `now`), same `recentSamples(kind: .heartRate,)` fetch and try?-to-empty fallback, same
+    /// `HRSample` mapping and ascending sort as the inline version it replaced. One change (#298): a
+    /// day below `RestingHR.dayCoverage` has no value, so the fever cross-check and the overnight
+    /// signals skip a thin day (as one with no readings) instead of comparing it — the same series
+    /// Vitals Status judges.
     func restingHRDailySeries(store: LocalStore) -> [RestingHR.DailyValue] {
         let since = Date().addingTimeInterval(-Double(VitalsBaseline.Config().maxBaselineDays + 2) * 86_400)
         // Decision 29: the current device's own readings (exactly `recentSamples` with an empty log).
         let hr = ((try? store.recentOwnSamples(kind: .heartRate, since: since)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-        return RestingHR.dailyValues(hr: hr).sorted { $0.day < $1.day }
+        return RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).sorted { $0.day < $1.day }
     }
 
     /// Resting-HR daily series → personal baseline, cross-referenced with the temp offset for the
