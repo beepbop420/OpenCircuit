@@ -2781,7 +2781,9 @@ struct CaloriesCardView: View {
     /// rings and Apple Health can never disagree.
     @Query private var recentStepSamples: [StoredStepSample]
 
-    init() {
+    /// `startWithProfileSheet` seeds the Set Up Profile sheet open; tests only (call sites use `init()`).
+    init(startWithProfileSheet: Bool = false) {
+        _showProfile = State(initialValue: startWithProfileSheet)
         let hr = MetricKind.heartRate.rawValue
         let dayStart = Calendar.current.startOfDay(for: Date())
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
@@ -2822,9 +2824,7 @@ struct CaloriesCardView: View {
     }
     private var maxHR: Int { max(220 - age, 1) }
     @State private var showEstimateInfo = false
-    /// Which of age / weight / height / sex are still placeholders. Re-read each render; the
-    /// `@AppStorage` properties above invalidate the body when a Profile value is written.
-    private var profileDefaults: ProfileDefaultsStatus { .current() }
+    @State private var showProfile = false
 
     /// Resting kcal accrued so far today: full-day BMR scaled by the elapsed fraction of today.
     private var restingToday: Double {
@@ -2848,14 +2848,18 @@ struct CaloriesCardView: View {
             Text("Resting \(Int(restingToday.rounded())) · Active (est.) \(Int(cachedActiveKcal.rounded()))")
                 .font(.caption).foregroundStyle(.secondary)
             // "max HR" here is the 220-age zone/calorie reference, NOT an observed peak.
+            let defaultsNow = ProfileDefaultsStatus.current()
             Text(CaloriesReferenceLine.text(bmr: Int(Calories.bmrKcalPerDay(profile: profile).rounded()),
-                                            maxHR: maxHR, age: age, status: profileDefaults))
+                                            maxHR: maxHR, age: age, status: defaultsNow))
                 .font(.caption2).foregroundStyle(.secondary)
             HStack(spacing: 12) {
-                if profileDefaults.anyDefault {
-                    DetailLink { UserProfileSettingsView() } label: {
+                // Buttons, never a NavigationLink: inside the Today List a link is hoisted to the
+                // whole row and a tap anywhere on the card would open Profile.
+                if defaultsNow.anyDefault {
+                    Button { showProfile = true } label: {
                         Text("Set Up Profile").font(.caption2.weight(.semibold))
                     }
+                    .buttonStyle(.borderless)
                 }
                 Button { showEstimateInfo = true } label: {
                     Label("How These Are Estimated", systemImage: "info.circle")
@@ -2866,6 +2870,16 @@ struct CaloriesCardView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $showEstimateInfo) { CaloriesEstimateInfoSheet() }
+        .sheet(isPresented: $showProfile) {
+            NavigationStack {
+                UserProfileSettingsView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showProfile = false }
+                        }
+                    }
+            }
+        }
         // Recompute the active-kcal estimate OFF the main actor (0x8BADF00D fix). d338484 moved this
         // to `.task` but a View's `.task` still runs on the MAIN actor — deferred, not off-loaded —
         // so a workout `stop()` ingest that invalidated the @Query still dragged this O(n) map+math

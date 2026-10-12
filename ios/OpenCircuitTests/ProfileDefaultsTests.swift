@@ -82,10 +82,43 @@ final class ProfileDefaultsTests: XCTestCase {
         XCTAssertEqual(CaloriesReferenceLine.list(["age", "weight", "sex"]), "age, weight and sex")
     }
 
+    func testSexAloneBeingUnsetCountsAsADefault() {
+        defaults.set(41, forKey: "userProfile.age")
+        defaults.set(70.0, forKey: "userProfile.weightKg")
+        defaults.set(170.0, forKey: "userProfile.heightCm")
+        let status = ProfileDefaultsStatus.current(defaults: defaults)
+        XCTAssertEqual(status, ProfileDefaultsStatus(age: false, weight: false, height: false, sex: true))
+        XCTAssertTrue(status.anyDefault)
+        XCTAssertTrue(CaloriesReferenceLine.text(bmr: 1700, maxHR: 179, age: 41, status: status)
+            .contains("(default sex)"))
+    }
+
+    // MARK: Imperial height seeding
+
+    func testSeedingFeetAndInchesFromTheDefaultHeightWritesNothing() {
+        // 170 cm seeds as 5 ft 7 in; committing that unchanged must not store a height.
+        XCTAssertNil(UserProfileSettingsView.heightCmToWrite(feet: 5, inches: 7, currentCm: 170))
+        XCTAssertNil(defaults.object(forKey: "userProfile.heightCm"))
+        XCTAssertTrue(ProfileDefaultsStatus.current(defaults: defaults).height)
+    }
+
+    func testARealHeightChangeStillWrites() throws {
+        let cm = try XCTUnwrap(UserProfileSettingsView.heightCmToWrite(feet: 5, inches: 10, currentCm: 170))
+        XCTAssertEqual(cm, 70 * 2.54, accuracy: 0.001)
+    }
+
+    // MARK: Strain sheet
+
+    func testStrainSheetDisclosesDefaultAge() {
+        XCTAssertTrue(StrainInfoSheet.defaultAgeNote.contains("default age of 35"))
+        XCTAssertTrue(ProfileDefaultsStatus.current(defaults: defaults).age)
+    }
+
     // MARK: Stage durations
 
     func testStageDurationLabels() {
-        let expected = [0: "0m", 59: "59m", 60: "1h", 89: "1h 29m", 120: "2h", 149: "2h 29m"]
+        // Same form as the sleep headline: "8h 0m", not "8h".
+        let expected = [0: "0m", 59: "59m", 60: "1h 0m", 89: "1h 29m", 120: "2h 0m", 149: "2h 29m"]
         for (minutes, label) in expected {
             XCTAssertEqual(StageDuration.label(minutes: minutes), label, "\(minutes)")
         }

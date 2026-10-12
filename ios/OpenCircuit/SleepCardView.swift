@@ -1537,29 +1537,28 @@ struct SleepCardView: View {
                              _ m: (inBed: Int, awake: Int, light: Int, deep: Int, rem: Int, asleep: Int)) -> some View {
         let asserted = assertedMinutes(night, m)
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 12) {
-                ForEach(Self.stages, id: \.name) { stage in
-                    let mins = stage.minutes(m)
-                    if mins > 0 {
-                        HStack(spacing: 4) {
-                            Circle().fill(stage.color).frame(width: 7, height: 7)
-                                .overlay {
-                                    if (asserted.map { stage.asserted($0) } ?? 0) > 0 {
-                                        Circle().fill(stage.color.opacity(0.45))
-                                            .overlay(AssertedHatch())
-                                            .clipShape(Circle())
-                                            .mask(alignment: .trailing) {
-                                                Rectangle().frame(width: 3.5)
-                                            }
-                                    }
+            StageLegendFlow(items: Self.stages.compactMap { stage -> AnyView? in
+                let mins = stage.minutes(m)
+                guard mins > 0 else { return nil }
+                let hatched = (asserted.map { stage.asserted($0) } ?? 0) > 0
+                return AnyView(
+                    HStack(spacing: 4) {
+                        Circle().fill(stage.color).frame(width: 7, height: 7)
+                            .overlay {
+                                if hatched {
+                                    Circle().fill(stage.color.opacity(0.45))
+                                        .overlay(AssertedHatch())
+                                        .clipShape(Circle())
+                                        .mask(alignment: .trailing) {
+                                            Rectangle().frame(width: 3.5)
+                                        }
                                 }
-                            Text("\(stage.name) \(StageDuration.label(minutes: mins))")
-                                .font(.caption2).foregroundStyle(.secondary)
-                                .accessibilityLabel("\(stage.name), \(StageDuration.spoken(minutes: mins))")
-                        }
-                    }
-                }
-            }
+                            }
+                        Text("\(stage.name) \(StageDuration.label(minutes: mins))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .accessibilityLabel("\(stage.name), \(StageDuration.spoken(minutes: mins))")
+                    })
+            })
             if let asserted, let line = Self.assertedStagesLine(asserted) {
                 Text(line).font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
