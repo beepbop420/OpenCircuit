@@ -1,11 +1,13 @@
 import XCTest
 @testable import OpenCircuitKit
 
-// Pins the DEFAULT `RestingHR.dailyValues` output (#298). The Apple Health resting-HR write
-// (`HealthKitWriter.flushRestingHR`, with the night's sleep segments) and the basal-energy scaling
-// (`HealthKitWriter.dailyRestingHR`, sleep omitted) call it without a coverage floor, and must keep
-// producing exactly these values, thin days included. This file uses only the API that predates the
-// floor, so it compiles and passes unchanged against the code before it.
+// Pins the DEFAULT `RestingHR.dailyValues` output (#298), thin days included. The basal-energy
+// scaling (`HealthKitWriter.dailyRestingHR`, sleep omitted) calls it without a coverage floor and must
+// keep producing exactly these values. The Apple Health resting-HR write (`flushRestingHR`, with the
+// night's sleep segments) now applies `RestingHR.dayCoverage` (Juan, 2026-10-12) and writes nothing
+// for a thin day, but every value it does write is this unfloored derivation's for that day; the
+// write itself is pinned in the app's `RestingHRHealthWriteTests`. This file uses only the API that
+// predates the floor, so it compiles and passes unchanged against the code before it.
 final class RestingHRDefaultPathPinTests: XCTestCase {
 
     private var cal: Calendar = {
@@ -39,8 +41,9 @@ final class RestingHRDefaultPathPinTests: XCTestCase {
         (0..<n).map { cal.date(byAdding: .day, value: $0, to: day0)! }
     }
 
-    /// `flushRestingHR`'s call shape: the sleep segments are passed.
-    func testTheHealthWritePathValuesArePinned() {
+    /// The sleep-passed shape `flushRestingHR` derives from. Its written days are the subset of these
+    /// above the coverage floor, each with exactly this value.
+    func testTheDerivationWithSleepIsPinned() {
         let c = corpus
         let out = RestingHR.dailyValues(hr: c.hr, sleep: c.sleep, calendar: cal)
         XCTAssertEqual(out.map(\.day), days(4))

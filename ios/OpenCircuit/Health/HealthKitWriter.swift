@@ -1702,10 +1702,35 @@ final class HealthKitWriter {
     /// Uses pre-fetched HR samples (shared with `flushPassiveCalories`) to avoid a redundant
     /// LocalStore query.
     private func flushRestingHR(prefetchedHR: [HRSample], sleepSegments: [SleepSegment]) async -> Int {
-        let cal = Calendar.current
-        let now = Date()
         let defaults = UserDefaults.standard
         let lastWritten = Date(timeIntervalSince1970: defaults.double(forKey: Self.rhrWatermarkKey))
+        let plan = Self.restingHRWritePlan(hr: prefetchedHR, sleepSegments: sleepSegments,
+                                           lastWritten: lastWritten, now: Date(), calendar: .current)
+        let outcome = await Self.writeRestingHRDays(plan, lastWritten: lastWritten) {
+            try await self.writeRestingHR(bpm: $0, day: $1)
+        }
+        if outcome.failed { pendingFlushFailures.insert(.restingHeartRate) }  // surface
+        if outcome.watermark > lastWritten {
+            defaults.set(outcome.watermark.timeIntervalSince1970, forKey: Self.rhrWatermarkKey)
+        }
+        return outcome.written
+    }
+
+    /// One finalized day after the resting-HR watermark that has readings, and the value to write
+    /// for it; `bpm` nil = below `RestingHR.dayCoverage` (#298), so it is not written.
+    struct RestingHRPlanDay: Equatable {
+        let day: Date
+        let bpm: Double?
+    }
+
+    /// The finalized days `flushRestingHR` considers, ascending. Pure, for tests.
+    ///
+    /// #298 (Juan, 2026-10-12): a day whose value would come from the daytime `lowestSustained` tier
+    /// on fewer readings, or a shorter span, than `RestingHR.dayCoverage` is NOT written: a few awake
+    /// readings synced before the night are not that day's resting HR. Days the sleep-mean tier
+    /// answers are unchanged, and so is every value that is written.
+    static func restingHRWritePlan(hr prefetchedHR: [HRSample], sleepSegments: [SleepSegment],
+                                   lastWritten: Date, now: Date, calendar cal: Calendar) -> [RestingHRPlanDay] {
         let cutoff = now.addingTimeInterval(-Self.restingFinalizationDelay)
         // Bound the scan: never re-read already-written days, and look back at most a week so a
         // first run backfills recent history without an unbounded query.
@@ -1713,22 +1738,37 @@ final class HealthKitWriter {
             ?? now.addingTimeInterval(-7 * 86_400)
         let scanStart = max(lookback, lastWritten)
         let hr = prefetchedHR.filter { $0.start >= scanStart }
-        guard !hr.isEmpty else { return 0 }
-        let days = RestingHR.dailyValues(hr: hr, sleep: sleepSegments, calendar: cal)
+        guard !hr.isEmpty else { return [] }
+        let all = RestingHR.dailyValues(hr: hr, sleep: sleepSegments, calendar: cal)
+        let covered = RestingHR.dailyValues(hr: hr, sleep: sleepSegments, calendar: cal,
+                                            daytimeCoverage: RestingHR.dayCoverage)
+        let coveredBpm = Dictionary(covered.map { ($0.day, $0.bpm) }, uniquingKeysWith: { a, _ in a })
+        return all.filter { $0.day > lastWritten && $0.day <= cutoff }   // days ascend
+            .map { RestingHRPlanDay(day: $0.day, bpm: coveredBpm[$0.day]) }
+    }
 
+    /// Write `plan` in order through `write`, stopping at the first failure. The watermark moves
+    /// only onto a day that was WRITTEN:
+    /// - a thin day before a written one ends up behind the watermark and is never written, even if
+    ///   its readings fill in later;
+    /// - a thin day after the last written one stays eligible, so if more of its readings arrive
+    ///   (typically the night, synced late) a later flush writes its full value — at most a week
+    ///   back, the scan's lookback;
+    /// - a written day is never rewritten: everything at or before the watermark is out of the plan.
+    static func writeRestingHRDays(_ plan: [RestingHRPlanDay], lastWritten: Date,
+                                   write: (Double, Date) async throws -> Void)
+    async -> (written: Int, watermark: Date, failed: Bool) {
         var written = 0
-        var newWatermark = lastWritten
-        for d in days where d.day > lastWritten && d.day <= cutoff {  // days ascend
+        var watermark = lastWritten
+        for d in plan {
+            guard let bpm = d.bpm else { continue }   // thin (#298): not written, watermark stays
             do {
-                try await writeRestingHR(bpm: d.bpm, day: d.day)
+                try await write(bpm, d.day)
                 written += 1
-                newWatermark = d.day
-            } catch { pendingFlushFailures.insert(.restingHeartRate); break }  // surface; stop, already-written days stay covered
+                watermark = d.day
+            } catch { return (written, watermark, true) }  // stop; already-written days stay covered
         }
-        if newWatermark > lastWritten {
-            defaults.set(newWatermark.timeIntervalSince1970, forKey: Self.rhrWatermarkKey)
-        }
-        return written
+        return (written, watermark, false)
     }
 
     /// How far back the basal-energy path reads daily resting HR: enough to hold the personal
