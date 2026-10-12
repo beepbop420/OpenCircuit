@@ -2755,6 +2755,14 @@ private struct QuickLoggedHeadache: Identifiable {
 /// static BMR/max-HR reference figures. Body inputs come from the profile page — the ring
 /// transmits none of them.
 struct CaloriesCardView: View {
+    var body: some View {
+        CurrentDayView("calories") { CaloriesCardBody(dayStart: $0) }
+    }
+}
+
+private struct CaloriesCardBody: View {
+    /// The day this instance was built for; `CurrentDayView` re-creates it when the day changes (#297).
+    private let dayStart: Date
     // Shared @AppStorage keys with UserProfileSettingsView (single source of truth).
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
@@ -2781,19 +2789,16 @@ struct CaloriesCardView: View {
     /// rings and Apple Health can never disagree.
     @Query private var recentStepSamples: [StoredStepSample]
 
-    init() {
-        let hr = MetricKind.heartRate.rawValue
-        let dayStart = Calendar.current.startOfDay(for: Date())
+    init(dayStart: Date) {
+        self.dayStart = dayStart
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
         _recentStepSamples = Query(
             filter: #Predicate<StoredStepSample> { $0.start >= stepsFrom },
             sort: \.start)
-        // Match GoalsCardView's HR query exactly: same start-of-day lower bound AND the `value > 0`
+        // Match GoalsCardView's HR query exactly: same one-day window AND the `value > 0`
         // guard, so a stray 0-bpm sample can't skew the active-calorie estimate and the two cards
         // read the same today's-HR set.
-        _hrSamples = Query(
-            filter: #Predicate { $0.kindRaw == hr && $0.start >= dayStart && $0.value > 0 },
-            sort: \.start)
+        _hrSamples = Query(GoalsCardQueries.heartRate(dayStart: dayStart))
         _todayDaily = Query(filter: #Predicate<StoredDaily> { $0.day == dayStart }, sort: \.day)
         var sleepDesc = FetchDescriptor<StoredSleepSummary>(
             sortBy: [SortDescriptor(\.night, order: .reverse)])

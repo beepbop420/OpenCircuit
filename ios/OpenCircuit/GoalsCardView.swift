@@ -16,7 +16,7 @@ import OpenCircuitKit
 /// its day-bound queries) when the day changes.
 struct GoalsCardView: View {
     var body: some View {
-        CurrentDayView { GoalsCardBody(dayStart: $0) }
+        CurrentDayView("goals") { GoalsCardBody(dayStart: $0) }
     }
 }
 

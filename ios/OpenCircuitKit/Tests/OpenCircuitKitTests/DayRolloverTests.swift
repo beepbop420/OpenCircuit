@@ -82,13 +82,16 @@ final class DayRolloverTests: XCTestCase {
                                              at: now, calendar: tokyo))
     }
 
-    func testDayRangeIsHalfOpenAndExcludesNeighbours() {
-        let cal = calendar("America/New_York")
-        let start = date(2026, 5, 4, in: cal)
-        let range = DayRollover.dayRange(startingAt: start, calendar: cal)
-        XCTAssertTrue(range.contains(start))
-        XCTAssertTrue(range.contains(date(2026, 5, 4, 23, 59, in: cal)))
-        XCTAssertFalse(range.contains(start.addingTimeInterval(-1)))
-        XCTAssertFalse(range.contains(date(2026, 5, 5, in: cal)))
+    func testDayThatStartsAtOneAmEndsAtTheNextDaysStart() {
+        // DST skipped midnight on this day, so it starts at 01:00 local. The next day starts at 00:00.
+        let cal = calendar("America/Santiago")
+        let start = DayRollover.dayKey(at: date(2026, 9, 6, 12, 0, in: cal), calendar: cal)
+        XCTAssertEqual(cal.component(.hour, from: start), 1)
+        let next = DayRollover.nextDayStart(after: start.addingTimeInterval(3600), calendar: cal)
+        XCTAssertEqual(next, date(2026, 9, 7, in: cal))
+        XCTAssertEqual(cal.component(.hour, from: next), 0)
+        XCTAssertTrue(DayRollover.didChange(from: start, at: next, calendar: cal))
+        // The day before ends at the 01:00 start.
+        XCTAssertEqual(DayRollover.nextDayStart(after: date(2026, 9, 5, 12, 0, in: cal), calendar: cal), start)
     }
 }

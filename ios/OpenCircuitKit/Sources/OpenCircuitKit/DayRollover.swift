@@ -14,11 +14,15 @@ public enum DayRollover {
     }
 
     /// The start of the following local day. Honours DST: on a 23 or 25 hour day this is still the
-    /// next midnight, not `now + 24h`.
+    /// next day's start, not `now + 24h`. Where DST skips midnight a day starts at 01:00; stepping
+    /// a day from a 01:00 start lands on 01:00 of the next day, so the result is re-snapped to the
+    /// start of the day it lands in.
     public static func nextDayStart(after now: Date, calendar: Calendar) -> Date {
         let today = calendar.startOfDay(for: now)
-        return calendar.date(byAdding: .day, value: 1, to: today)
-            ?? today.addingTimeInterval(86_400)
+        guard let stepped = calendar.date(byAdding: .day, value: 1, to: today) else {
+            return today.addingTimeInterval(86_400)
+        }
+        return calendar.startOfDay(for: stepped)
     }
 
     /// True when the day `now` falls in is not the day the view last showed. Compares the day KEY,
@@ -27,10 +31,5 @@ public enum DayRollover {
     /// the key too, because `calendar` carries the zone in force now.
     public static func didChange(from lastKey: Date, at now: Date, calendar: Calendar) -> Bool {
         dayKey(at: now, calendar: calendar) != lastKey
-    }
-
-    /// The half-open range `[start, nextDayStart)` for the day keyed `dayStart`.
-    public static func dayRange(startingAt dayStart: Date, calendar: Calendar) -> Range<Date> {
-        dayStart..<nextDayStart(after: dayStart, calendar: calendar)
     }
 }

@@ -28,10 +28,12 @@ import OpenCircuitKit
 // who simply don't get headaches (docs/HEADACHE_SIGNALS.md §6.1). The word stays on the log.
 
 /// The screen as pushed from the app: it follows the calendar day (#297), so the history window
-/// below is anchored to the current day rather than the day the screen was first created.
+/// below is anchored to the current day rather than the day the screen was first created. NOT
+/// re-keyed: the log/edit sheet and its draft live in this screen's state and must survive a day
+/// change; the risk query picks up the new day through `init(dayStart:)`.
 struct HeadacheSignalsView: View {
     var body: some View {
-        CurrentDayView { HeadacheSignalsBody(dayStart: $0) }
+        CurrentDayView("headacheSignals", rekey: false) { HeadacheSignalsBody(dayStart: $0) }
     }
 }
 
