@@ -597,6 +597,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         }
 
         let write = alert.save()                 // the button's action
+        XCTAssertNil(journal.journal, "taken the moment Save is tapped, before its Task runs")
         alert.setPresented(false)                // then the alert's dismissal
         XCTAssertFalse(alert.isPresented)
         await write?.value
