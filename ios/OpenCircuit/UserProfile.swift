@@ -845,11 +845,20 @@ struct UserProfileSettingsView: View {
         heightInchesInput = total % 12
     }
 
+    /// The cm to store for the typed ft/in, or nil when it equals the stored height in whole inches.
+    /// Seeding the ft/in buffers on appear also lands in `commitHeight()`; an unchanged value is not
+    /// an edit and must not write the key (it would clear the "default height" flag).
+    static func heightCmToWrite(feet: Int, inches: Int, currentCm: Double) -> Double? {
+        let total = max(feet, 0) * 12 + min(max(inches, 0), 11)
+        guard total != Int((currentCm / cmPerIn).rounded()) else { return nil }
+        return Double(total) * cmPerIn
+    }
+
     /// Write the local ft/in fields back to `heightCm`, clamping inches to 0...11.
     private func commitHeight() {
-        let feet = max(heightFeetInput, 0)
-        let inches = min(max(heightInchesInput, 0), 11)
-        heightCm = Double(feet * 12 + inches) * Self.cmPerIn
+        guard let cm = Self.heightCmToWrite(feet: heightFeetInput, inches: heightInchesInput,
+                                            currentCm: heightCm) else { return }
+        heightCm = cm
     }
 
     // MARK: Sleep-schedule bindings (minutes-since-midnight <-> Date for DatePicker)

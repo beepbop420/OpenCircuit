@@ -16,7 +16,24 @@ import SwiftUI
 import SwiftData
 import OpenCircuitKit
 
+/// The card as placed in the app: it follows the calendar day (#297), re-creating its body (and so
+/// its day-bound queries) when the day changes.
 struct WellnessBalanceCardView: View {
+    var onReport: ((ReadinessReport) -> Void)?
+
+    init(onReport: ((ReadinessReport) -> Void)? = nil) {
+        self.onReport = onReport
+    }
+
+    var body: some View {
+        CurrentDayView("wellness") { WellnessBalanceCardBody(dayStart: $0, onReport: onReport) }
+    }
+}
+
+private struct WellnessBalanceCardBody: View {
+
+    /// The day this instance was built for; `CurrentDayView` re-creates it when the day changes.
+    private let dayStart: Date
 
     // Goal + profile settings (shared with GoalsCardView / GoalDefaults) for the Activity Score.
     @AppStorage(GoalDefaults.workdaySteps)    private var workdaySteps   = GoalDefaults.defaultWorkdaySteps
@@ -50,18 +67,15 @@ struct WellnessBalanceCardView: View {
     @ScaledMetric(relativeTo: .largeTitle) private var ringSize: CGFloat = 132
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    init(onReport: ((ReadinessReport) -> Void)? = nil) {
+    init(dayStart: Date, onReport: ((ReadinessReport) -> Void)?) {
         self.onReport = onReport
-        let dayStart = Calendar.current.startOfDay(for: Date())
+        self.dayStart = dayStart
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
-        let hrKind = MetricKind.heartRate.rawValue
         _recentStepSamples = Query(FetchDescriptor<StoredStepSample>(
             predicate: #Predicate { $0.start >= stepsFrom },
             sortBy: [SortDescriptor(\.start, order: .forward)]))
         _todayDaily = Query(filter: #Predicate<StoredDaily> { $0.day == dayStart }, sort: \.day)
-        _todayHR = Query(FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == hrKind && $0.start >= dayStart && $0.value > 0 },
-            sortBy: [SortDescriptor(\.start, order: .forward)]))
+        _todayHR = Query(GoalsCardQueries.heartRate(dayStart: dayStart))
         var sleepDesc = FetchDescriptor<StoredSleepSummary>(sortBy: [SortDescriptor(\.night, order: .reverse)])
         sleepDesc.fetchLimit = 1
         _latestSleep = Query(sleepDesc)
@@ -221,7 +235,6 @@ struct WellnessBalanceCardView: View {
             let stepWindows = recentStepSamples.map {
                 StepWindow(start: $0.start, end: $0.end, delta: $0.delta)
             }
-            let dayStart = Calendar.current.startOfDay(for: Date())
             // #281 motion gate (off by default): the ring's own activity sessions.
             let activityIntervals = RingActivityEventLedger.load().corroboratingIntervals(now: Date())
             let creditedWorkoutIntervals = HealthKitWriter.workoutCreditedSpans(day: dayStart)

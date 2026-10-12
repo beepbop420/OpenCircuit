@@ -119,8 +119,14 @@ struct StrainTileView: View {
 /// What strain is, opened from the Strain tile. Text only, in the voice of the PAI sheet.
 struct StrainInfoSheet: View {
     let reading: DailyStrain.Reading?
+    /// True while Profile age has never been set, so the 220 − age maximum rests on the placeholder
+    /// age. Same predicate as the Profile age row (`ProfileDefaultsStatus`).
+    var ageIsDefault: Bool = ProfileDefaultsStatus.current().age
 
     @Environment(\.dismiss) private var dismiss
+
+    static let defaultAgeNote = "Your age isn't set in Profile, so this maximum uses a default age of 35. "
+        + "Set your age in Profile for zones that fit you."
 
     static let bullets = [
         "Strain is how hard your heart has worked today, on a 0 to 21 scale. It adds up the time your "
@@ -140,11 +146,13 @@ struct StrainInfoSheet: View {
             List {
                 Section {
                     ForEach(Self.bullets, id: \.self) { Text($0).font(.subheadline) }
+                    if ageIsDefault { Text(Self.defaultAgeNote).font(.subheadline) }
                 }
                 if let reading, let rhr = reading.restingHR {
                     Section("Today's zones use") {
                         LabeledContent("Resting heart rate", value: "\(rhr) bpm")
-                        LabeledContent("Estimated maximum", value: "\(reading.maxHR) bpm")
+                        LabeledContent("Estimated maximum",
+                                       value: "\(reading.maxHR) bpm" + (ageIsDefault ? " (default age)" : ""))
                     }
                 }
             }
