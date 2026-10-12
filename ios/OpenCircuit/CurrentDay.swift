@@ -20,8 +20,10 @@ import OpenCircuitKit
 struct DayClock {
     var now: () -> Date = { Date() }
     var calendar: () -> Calendar = { .current }
-    /// Test hook: called with the view's name and the day each time its content appears for a day.
+    /// Test hooks: `onBuild` fires each time the content is created for a day (so a re-key shows
+    /// up), `onDayChange` each time the day the view follows moves.
     var onBuild: ((String, Date) -> Void)?
+    var onDayChange: ((String, Date) -> Void)?
 }
 
 private struct DayClockKey: EnvironmentKey {
@@ -60,9 +62,10 @@ struct CurrentDayView<Content: View>: View {
     var body: some View {
         let day = dayStart ?? currentKey
         content(day)
-            .id(rekey ? day : Date.distantPast)
             .onAppear { clock.onBuild?(name, day) }
-            .onChange(of: day) { _, new in clock.onBuild?(name, new) }
+            .id(rekey ? day : Date.distantPast)
+            .onAppear { if dayStart == nil { dayStart = day } }
+            .onChange(of: day) { _, new in clock.onDayChange?(name, new) }
             .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in refresh() }
             .onReceive(NotificationCenter.default.publisher(
                 for: UIApplication.significantTimeChangeNotification)) { _ in refresh() }

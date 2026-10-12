@@ -35,9 +35,12 @@ final class CurrentDayWiringTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
+    private let changes = Builds()
+
     private func host<V: View>(_ root: V, clock: Clock, builds: Builds) -> (UIWindow, UIHostingController<AnyView>) {
         let dayClock = DayClock(now: { clock.now }, calendar: { self.cal },
-                                onBuild: { builds.events.append(($0, $1)) })
+                                onBuild: { builds.events.append(($0, $1)) },
+                                onDayChange: { self.changes.events.append(($0, $1)) })
         let vc = UIHostingController(rootView: AnyView(root.environment(\.dayClock, dayClock)))
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = vc
@@ -65,6 +68,7 @@ final class CurrentDayWiringTests: XCTestCase {
         crossMidnight(clock, to: at(5, 0, 5))
         XCTAssertEqual(seen.days("content").last, at(5, 0))
         XCTAssertEqual(builds.days("probe"), [at(4, 0), at(5, 0)])
+        XCTAssertEqual(changes.days("probe"), [at(5, 0)])
         withExtendedLifetime(window) {}
     }
 
@@ -73,6 +77,7 @@ final class CurrentDayWiringTests: XCTestCase {
         let (window, _) = host(CurrentDayView("probe") { _ in Color.clear }, clock: clock, builds: builds)
         crossMidnight(clock, to: at(4, 21))
         XCTAssertEqual(builds.days("probe"), [at(4, 0)])
+        XCTAssertEqual(changes.days("probe"), [])
         withExtendedLifetime(window) {}
     }
 
@@ -107,7 +112,8 @@ final class CurrentDayWiringTests: XCTestCase {
         edit?()
         spin(0.1)
         crossMidnight(clock, to: at(5, 0, 5))
-        XCTAssertEqual(builds.days("draft"), [at(4, 0), at(5, 0)], "the day still moved")
+        XCTAssertEqual(changes.days("draft"), [at(5, 0)], "the day still moved")
+        XCTAssertEqual(builds.days("draft"), [at(4, 0)], "without rebuilding the content")
         XCTAssertEqual(reports, ["initial"], "content was not rebuilt, so onAppear did not fire again")
         withExtendedLifetime(window) {}
     }
@@ -157,7 +163,8 @@ final class CurrentDayWiringTests: XCTestCase {
         let (window, _) = host(NavigationStack { HeadacheSignalsView() }.modelContainer(c),
                                clock: clock, builds: builds)
         crossMidnight(clock, to: at(5, 0, 2))
-        XCTAssertEqual(builds.days("headacheSignals"), [at(4, 0), at(5, 0)])
+        XCTAssertEqual(changes.days("headacheSignals"), [at(5, 0)])
+        XCTAssertEqual(builds.days("headacheSignals"), [at(4, 0)], "the screen is not torn down")
         withExtendedLifetime(window) {}
     }
 }
