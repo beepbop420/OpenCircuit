@@ -13,8 +13,9 @@
 // `dayCoverage`, and a day whose value would come from tier 2 on fewer readings, or a shorter
 // span of them, than the floor gets NO value — exactly as if it had no readings. Without it, the
 // few awake readings synced so far today became "today's resting HR" (≈ the current HR) and raised
-// an elevated-RHR WATCH. The default (nil) is the old behaviour, unchanged, so the Apple Health
-// resting-HR write and the basal-energy scaling see the same values they always did.
+// an elevated-RHR WATCH. The Apple Health resting-HR write applies the floor too (a thin finalized
+// day is not written, #298). The default (nil) is the old behaviour, unchanged; the basal-energy
+// scaling and the VO2 max input still use it.
 //
 // Pure value-type math (no HealthKit / device types) so it unit-tests on macOS.
 

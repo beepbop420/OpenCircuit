@@ -1698,7 +1698,8 @@ final class HealthKitWriter {
         return stored.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
     }
 
-    /// Write one resting-HR sample per finalized day not yet covered by the day-watermark.
+    /// Write one resting-HR sample per finalized day not yet covered by the day-watermark, skipping a
+    /// day whose value would come from too few daytime readings (`RestingHR.dayCoverage`, #298).
     /// Uses pre-fetched HR samples (shared with `flushPassiveCalories`) to avoid a redundant
     /// LocalStore query.
     private func flushRestingHR(prefetchedHR: [HRSample], sleepSegments: [SleepSegment]) async -> Int {
