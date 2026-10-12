@@ -95,11 +95,10 @@ final class ProfileDefaultsTests: XCTestCase {
 
     // MARK: Imperial height seeding
 
-    func testSeedingFeetAndInchesFromTheDefaultHeightWritesNothing() {
+    /// The pure helper only; the hosted Profile screen test is `ProfileScreenHostedTests`.
+    func testSeedingFeetAndInchesFromTheDefaultHeightIsNotAnEdit() {
         // 170 cm seeds as 5 ft 7 in; committing that unchanged must not store a height.
         XCTAssertNil(UserProfileSettingsView.heightCmToWrite(feet: 5, inches: 7, currentCm: 170))
-        XCTAssertNil(defaults.object(forKey: "userProfile.heightCm"))
-        XCTAssertTrue(ProfileDefaultsStatus.current(defaults: defaults).height)
     }
 
     func testARealHeightChangeStillWrites() throws {
