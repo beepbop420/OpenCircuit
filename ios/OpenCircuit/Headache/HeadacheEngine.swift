@@ -164,7 +164,7 @@ enum HeadacheAssessmentBuilder {
 
         // Resting HR: the caller's already-derived series when it has one, else the SAME canonical
         // derivation the vitals card and the fever alert make off the same readings
-        // (`VitalsStatusCardView.swift:189`, `HealthNotificationCenter.swift:318`), coverage floor
+        // (`VitalsStatusCardView.restingHRDaily`, `HealthNotificationCenter.restingHRDailySeries`), coverage floor
         // included (#298), so the three can never disagree about a day's resting HR.
         let restingDaily = (s.providedRestingHR.isEmpty
                             ? RestingHR.dailyValues(hr: s.hr, daytimeCoverage: RestingHR.dayCoverage)

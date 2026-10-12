@@ -49,6 +49,11 @@ final class RestingHRDayCoverageTests: XCTestCase {
         XCTAssertNil(RestingHR.value(hr: burst, daytimeCoverage: floor))
     }
 
+    /// Pins the floor's two values, so a retune is a conscious edit rather than a silent one.
+    func testTheFloorValuesArePinned() {
+        XCTAssertEqual(RestingHR.dayCoverage, RestingHR.DaytimeCoverage(minReadings: 12, minSpan: 4 * 3600))
+    }
+
     func testTheFloorBoundaries() {
         let n = floor.minReadings
         /// `count` readings from 01:00 whose last one sits exactly `span` after the first.

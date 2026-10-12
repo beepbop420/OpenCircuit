@@ -254,7 +254,8 @@ public enum VO2MaxEstimate {
     public static let minRestingDays = 3
 
     /// The resting HR input: the median of the most recent 7 daily resting-HR values on or before
-    /// the run's day (`RestingHR.dailyValues`, the series the app already shows). nil below
+    /// the run's day (`RestingHR.dailyValues` without the display coverage floor of #298, so on a
+    /// thin day it can hold a value the app's own tile does not show). nil below
     /// `minRestingDays` values. The median keeps one short or disturbed day from moving it.
     public static func restingHR(daily: [RestingHR.DailyValue], runStart: Date,
                                  calendar: Calendar = .current) -> Double? {
