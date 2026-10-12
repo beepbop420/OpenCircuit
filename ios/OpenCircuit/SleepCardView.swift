@@ -1553,7 +1553,9 @@ struct SleepCardView: View {
                                             }
                                     }
                                 }
-                            Text("\(stage.name) \(mins)m").font(.caption2).foregroundStyle(.secondary)
+                            Text("\(stage.name) \(StageDuration.label(minutes: mins))")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .accessibilityLabel("\(stage.name), \(StageDuration.spoken(minutes: mins))")
                         }
                     }
                 }
@@ -1582,7 +1584,7 @@ struct SleepCardView: View {
     private static func assertedStagesLine(_ a: (light: Int, deep: Int, rem: Int, awake: Int)) -> String? {
         let parts = [("Light", a.light), ("Deep", a.deep), ("REM", a.rem), ("Awake", a.awake)]
             .filter { $0.1 > 0 }
-            .map { "\($0.1)m \($0.0)" }
+            .map { "\(StageDuration.label(minutes: $0.1)) \($0.0)" }
         guard !parts.isEmpty else { return nil }
         return "Hatched: \(parts.joined(separator: " · ")) — your own account of time the ring "
             + "recorded nothing across. Still counted in the totals above, marked so it reads as "

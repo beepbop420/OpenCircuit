@@ -2821,6 +2821,10 @@ struct CaloriesCardView: View {
                     sex: BiologicalSex(rawValue: sexRaw) ?? .male)
     }
     private var maxHR: Int { max(220 - age, 1) }
+    @State private var showEstimateInfo = false
+    /// Which of age / weight / height / sex are still placeholders. Re-read each render; the
+    /// `@AppStorage` properties above invalidate the body when a Profile value is written.
+    private var profileDefaults: ProfileDefaultsStatus { .current() }
 
     /// Resting kcal accrued so far today: full-day BMR scaled by the elapsed fraction of today.
     private var restingToday: Double {
@@ -2844,10 +2848,24 @@ struct CaloriesCardView: View {
             Text("Resting \(Int(restingToday.rounded())) · Active (est.) \(Int(cachedActiveKcal.rounded()))")
                 .font(.caption).foregroundStyle(.secondary)
             // "max HR" here is the 220-age zone/calorie reference, NOT an observed peak.
-            Text("BMR \(Int(Calories.bmrKcalPerDay(profile: profile).rounded())) kcal/day · est. max HR \(maxHR) bpm (220 − age)")
+            Text(CaloriesReferenceLine.text(bmr: Int(Calories.bmrKcalPerDay(profile: profile).rounded()),
+                                            maxHR: maxHR, age: age, status: profileDefaults))
                 .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                if profileDefaults.anyDefault {
+                    DetailLink { UserProfileSettingsView() } label: {
+                        Text("Set Up Profile").font(.caption2.weight(.semibold))
+                    }
+                }
+                Button { showEstimateInfo = true } label: {
+                    Label("How These Are Estimated", systemImage: "info.circle")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $showEstimateInfo) { CaloriesEstimateInfoSheet() }
         // Recompute the active-kcal estimate OFF the main actor (0x8BADF00D fix). d338484 moved this
         // to `.task` but a View's `.task` still runs on the MAIN actor — deferred, not off-loaded —
         // so a workout `stop()` ingest that invalidated the @Query still dragged this O(n) map+math
