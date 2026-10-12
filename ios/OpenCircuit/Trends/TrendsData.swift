@@ -23,8 +23,9 @@ struct TrendsData {
     var goalDays: [GoalHistory.Day] = []
     /// Streak / met-count roll-up over `goalDays`.
     var goalSummary: GoalHistory.Summary = GoalHistory.summarize([], now: Date())
-    /// Per-day resting HR over the same window (`RestingHR.dailyValues`, the derivation Vitals Status
-    /// uses), oldest first — the Today tab's Resting HR tile (#216). `DailyPoint` carries no resting HR.
+    /// Per-day resting HR over the same window (`RestingHR.dailyValues` with `RestingHR.dayCoverage`,
+    /// the derivation Vitals Status uses), oldest first — the Today tab's Resting HR tile (#216). A day
+    /// below the coverage floor is absent (#298). `DailyPoint` carries no resting HR.
     var restingHR: [RestingHR.DailyValue] = []
     /// Start time of the newest stored ring reading of any kind in the window, or nil when there is
     /// none — what the Today synthesis line judges freshness by (#216).
@@ -134,10 +135,7 @@ struct TrendsData {
         let points = await Task.detached { computePoints(inputs) }.value
         let goalDays = await Task.detached { computeGoalDays(inputs, points: points) }.value
         let recentRows = await buildRecentMetricRows(inputs)
-        let restingHR = await Task.detached {
-            RestingHR.dailyValues(hr: inputs.hr.filter { $0.value > 0 }
-                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) })
-        }.value
+        let restingHR = await Task.detached { restingHRDaily(inputs.hr) }.value
         let nightOwners = inputs.summaryByNight.mapValues {
             ownership.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
         }
@@ -146,6 +144,16 @@ struct TrendsData {
                           goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()),
                           restingHR: restingHR, newestSampleAt: newestSample(inputs),
                           ownership: ownership, nightOwners: nightOwners, todayStrain: todayStrain)
+    }
+
+    /// The per-day resting-HR series (`restingHR` above) from the window's HR rows. #298: a day below
+    /// `RestingHR.dayCoverage` has no value, so the tile falls back to the last day that has one
+    /// (labelled with that day) and today's strain to the newest earlier day.
+    nonisolated static func restingHRDaily(_ hr: [QuantitySample],
+                                           calendar: Calendar = .current) -> [RestingHR.DailyValue] {
+        RestingHR.dailyValues(hr: hr.filter { $0.value > 0 }
+            .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) },
+                              calendar: calendar, daytimeCoverage: RestingHR.dayCoverage)
     }
 
     /// Today's strain so far (#216): midnight → now, from the HR this load already fetched (already

@@ -330,6 +330,15 @@ preferred = mean HR across the night's `asleep*` segments; fallback = the lowest
 start-of-day, finalizing a day only once it's ~12 h old (so a pre-dawn sync can't freeze a
 partial-night value while last night's RHR still lands by midday).
 
+Coverage floor (#298): a day answered by the fallback needs at least 12 readings spanning at
+least 4 h (`RestingHR.dayCoverage`), or it gets no resting HR: not on the Today tile, not in
+Vitals Status or alerts, and not in Apple Health. Night wearers are unaffected (the sleep mean
+answers, and a night spans more than 4 h). Someone who wears the device only a few daytime hours
+and never at night (a short ring session, a strap worn only for a workout) gets no resting HR
+written: the lowest HR of a short awake or exercising stretch is not a resting heart rate. The
+watermark moves only onto a written day, so a thin day after the last written one is written
+later with its full value if its readings fill in (within the 7-day lookback).
+
 ### Calories: passive (BMR) + active (TRIMP), idempotent (#37)
 
 `flushToHealth` also writes energy: **passive** = hourly BMR (`Calories.bmrKcalPerHour`) to

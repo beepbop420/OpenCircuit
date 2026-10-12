@@ -219,9 +219,12 @@ struct VitalsStatusCardView: View {
         days.sorted { $0.day < $1.day }.map(\.value)
     }
 
-    /// Resting HR per day = the day's sleep/low-activity HR estimate (RestingHR analytics).
-    nonisolated private static func restingHRDaily(_ hr: [HRSample]) -> [(day: Date, value: Double)] {
-        RestingHR.dailyValues(hr: hr).map { (day: $0.day, value: $0.bpm) }
+    /// Resting HR per day = the day's sleep/low-activity HR estimate (RestingHR analytics). A day
+    /// below `RestingHR.dayCoverage` has no value (#298), so a few awake readings synced so far today
+    /// are never judged as today's resting HR; the latest day WITH a value is judged instead, as when
+    /// today has no readings at all.
+    nonisolated static func restingHRDaily(_ hr: [HRSample]) -> [(day: Date, value: Double)] {
+        RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).map { (day: $0.day, value: $0.bpm) }
     }
 
     /// Per-calendar-day mean of a sample kind (SpO₂ fraction → percent via `scale`).
