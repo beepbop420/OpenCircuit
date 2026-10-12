@@ -157,6 +157,23 @@ final class CurrentDayWiringTests: XCTestCase {
         withExtendedLifetime(window) {}
     }
 
+    /// The Profile sheet lives on the wrapper, outside the re-keyed content, so a day change must
+    /// neither dismiss it nor lose it (the user may be mid-edit).
+    func testProfileSheetStaysPresentedWhileTheCaloriesDayMoves() throws {
+        let clock = Clock(at(4, 23, 55)), builds = Builds()
+        let c = try container()
+        let (window, vc) = host(NavigationStack { CaloriesCardView(startWithProfileSheet: true) }.modelContainer(c),
+                                clock: clock, builds: builds)
+        spin(1.0)
+        XCTAssertNotNil(vc.presentedViewController, "the Profile sheet did not present")
+        crossMidnight(clock, to: at(5, 0, 2))
+        spin(0.5)
+        XCTAssertEqual(changes.days("calories"), [at(5, 0)], "the day moved")
+        XCTAssertEqual(builds.days("calories"), [at(4, 0), at(5, 0)], "and the body was rebuilt")
+        XCTAssertNotNil(vc.presentedViewController, "a day change dismissed the Profile sheet")
+        withExtendedLifetime(window) {}
+    }
+
     func testHeadacheSignalsFollowsTheDayWithoutBeingRekeyed() throws {
         let clock = Clock(at(4, 23, 55)), builds = Builds()
         let c = try container()

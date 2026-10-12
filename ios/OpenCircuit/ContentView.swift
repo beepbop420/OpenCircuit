@@ -2754,15 +2754,44 @@ private struct QuickLoggedHeadache: Identifiable {
 /// into resting (BMR prorated over the elapsed day) + active (HR/step estimate), then the
 /// static BMR/max-HR reference figures. Body inputs come from the profile page — the ring
 /// transmits none of them.
+///
+/// This wrapper follows the calendar day (#297). The two sheets and their state live HERE, outside the
+/// re-keyed `CurrentDayView`, so a day change never dismisses a Profile edit in progress; the body
+/// is handed the two actions that present them.
 struct CaloriesCardView: View {
+    @State private var showEstimateInfo = false
+    @State private var showProfile: Bool
+
+    /// `startWithProfileSheet` seeds the Set Up Profile sheet open; tests only (call sites use `init()`).
+    init(startWithProfileSheet: Bool = false) {
+        _showProfile = State(initialValue: startWithProfileSheet)
+    }
+
     var body: some View {
-        CurrentDayView("calories") { CaloriesCardBody(dayStart: $0) }
+        CurrentDayView("calories") {
+            CaloriesCardBody(dayStart: $0,
+                             onSetUpProfile: { showProfile = true },
+                             onShowEstimateInfo: { showEstimateInfo = true })
+        }
+        .sheet(isPresented: $showEstimateInfo) { CaloriesEstimateInfoSheet() }
+        .sheet(isPresented: $showProfile) {
+            NavigationStack {
+                UserProfileSettingsView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showProfile = false }
+                        }
+                    }
+            }
+        }
     }
 }
 
 private struct CaloriesCardBody: View {
     /// The day this instance was built for; `CurrentDayView` re-creates it when the day changes (#297).
     private let dayStart: Date
+    private let onSetUpProfile: () -> Void
+    private let onShowEstimateInfo: () -> Void
     // Shared @AppStorage keys with UserProfileSettingsView (single source of truth).
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
@@ -2789,8 +2818,10 @@ private struct CaloriesCardBody: View {
     /// rings and Apple Health can never disagree.
     @Query private var recentStepSamples: [StoredStepSample]
 
-    init(dayStart: Date) {
+    init(dayStart: Date, onSetUpProfile: @escaping () -> Void, onShowEstimateInfo: @escaping () -> Void) {
         self.dayStart = dayStart
+        self.onSetUpProfile = onSetUpProfile
+        self.onShowEstimateInfo = onShowEstimateInfo
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
         _recentStepSamples = Query(
             filter: #Predicate<StoredStepSample> { $0.start >= stepsFrom },
@@ -2849,8 +2880,25 @@ private struct CaloriesCardBody: View {
             Text("Resting \(Int(restingToday.rounded())) · Active (est.) \(Int(cachedActiveKcal.rounded()))")
                 .font(.caption).foregroundStyle(.secondary)
             // "max HR" here is the 220-age zone/calorie reference, NOT an observed peak.
-            Text("BMR \(Int(Calories.bmrKcalPerDay(profile: profile).rounded())) kcal/day · est. max HR \(maxHR) bpm (220 − age)")
+            let defaultsNow = ProfileDefaultsStatus.current()
+            Text(CaloriesReferenceLine.text(bmr: Int(Calories.bmrKcalPerDay(profile: profile).rounded()),
+                                            maxHR: maxHR, age: age, status: defaultsNow))
                 .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                // Buttons, never a NavigationLink: inside the Today List a link is hoisted to the
+                // whole row and a tap anywhere on the card would open Profile.
+                if defaultsNow.anyDefault {
+                    Button(action: onSetUpProfile) {
+                        Text("Set Up Profile").font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                }
+                Button(action: onShowEstimateInfo) {
+                    Label("How These Are Estimated", systemImage: "info.circle")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Recompute the active-kcal estimate OFF the main actor (0x8BADF00D fix). d338484 moved this

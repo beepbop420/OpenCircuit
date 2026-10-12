@@ -169,7 +169,7 @@ struct SleepHypnogramChart: View {
     /// "2:14 – 2:51 AM · 37m".
     static func span(_ seg: SleepSegment) -> String {
         let minutes = Int((seg.end.timeIntervalSince(seg.start) / 60).rounded())
-        let length = minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
+        let length = StageDuration.label(minutes: minutes)
         return "\(seg.start.formatted(date: .omitted, time: .shortened)) – "
             + "\(seg.end.formatted(date: .omitted, time: .shortened)) · \(length)"
     }
