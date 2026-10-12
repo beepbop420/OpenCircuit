@@ -9,6 +9,13 @@
 //      (lowest sustained HR during inactivity), so our value sits alongside Apple's on a
 //      comparable basis. Requiring a multi-reading window rejects single-reading dips.
 //
+// Coverage floor on tier 2 (#298), OPT-IN: a caller that shows or alerts on a day's value passes
+// `dayCoverage`, and a day whose value would come from tier 2 on fewer readings, or a shorter
+// span of them, than the floor gets NO value — exactly as if it had no readings. Without it, the
+// few awake readings synced so far today became "today's resting HR" (≈ the current HR) and raised
+// an elevated-RHR WATCH. The default (nil) is the old behaviour, unchanged, so the Apple Health
+// resting-HR write and the basal-energy scaling see the same values they always did.
+//
 // Pure value-type math (no HealthKit / device types) so it unit-tests on macOS.
 
 import Foundation
@@ -21,14 +28,46 @@ public enum RestingHR {
     /// a night's resting value, so we fall back to the low-activity method instead.
     public static let minSleepSamples = 3
 
+    /// The least daytime evidence a day needs before its lowest-sustained value is shown or judged.
+    /// Both bounds must hold: `minReadings` stops a few scattered spot reads that happen to span
+    /// hours, `minSpan` (first to last reading) stops a short dense burst. The sleep-mean tier keeps
+    /// its own floor (`minSleepSamples`) and is not affected.
+    public struct DaytimeCoverage: Equatable, Sendable {
+        public let minReadings: Int
+        public let minSpan: TimeInterval
+        public init(minReadings: Int, minSpan: TimeInterval) {
+            self.minReadings = minReadings
+            self.minSpan = minSpan
+        }
+
+        /// Whether `hr` (already plausibility-filtered) clears both bounds.
+        func isMet(by hr: [HRSample]) -> Bool {
+            guard hr.count >= minReadings,
+                  let first = hr.min(by: { $0.start < $1.start }),
+                  let last = hr.max(by: { $0.start < $1.start }) else { return false }
+            return last.start.timeIntervalSince(first.start) >= minSpan
+        }
+    }
+
+    /// The floor the Today tile, Vitals Status and the notifications apply (#298). 🟡 Set from the
+    /// cadences, not from a coverage histogram: the strap logs one HR per activity minute (60 s),
+    /// the ring one per 150 s history epoch plus a 600 s auto-measure while connected.
+    /// - 12 readings: the in-repo daytime floor (`HeadacheAssessmentBuilder.minDaytimeHRSamples`);
+    ///   about 30 min of ring epochs, 2 h of auto-measure-only spot reads, 12 min of strap minutes.
+    /// - 4 h: a day that includes its night clears this by early morning on either device; a short
+    ///   burst of awake readings (a strap opened before last night synced) does not.
+    public static let dayCoverage = DaytimeCoverage(minReadings: 12, minSpan: 4 * 3600)
+
     /// One day's resting-HR estimate in bpm, or nil when there are no readings at all.
     /// `sleep` should be the segments overlapping this day; only `asleep*` stages count
-    /// (in-bed/awake carry motion and arousals and are excluded).
+    /// (in-bed/awake carry motion and arousals and are excluded). With `daytimeCoverage`, also nil
+    /// when the value would come from the lowest-sustained tier on readings below that floor.
     public static func value(
         hr: [HRSample],
         sleep: [SleepSegment] = [],
         window: TimeInterval = sustainedWindow,
-        minSleepSamples: Int = minSleepSamples
+        minSleepSamples: Int = minSleepSamples,
+        daytimeCoverage: DaytimeCoverage? = nil
     ) -> Double? {
         // Drop physiologically-impossible readings (LiveHR.validBPM, 30…220) before deriving a
         // resting value — so a stray garbage epoch (the "4 bpm" bug) or a not-yet-purged legacy row
@@ -38,6 +77,7 @@ public enum RestingHR {
         if let asleepMean = sleepMean(hr: hr, sleep: sleep, minSleepSamples: minSleepSamples) {
             return asleepMean
         }
+        if let daytimeCoverage, !daytimeCoverage.isMet(by: hr) { return nil }
         return lowestSustained(hr: hr, window: window)
     }
 
@@ -123,7 +163,7 @@ public enum RestingHR {
     /// Per-calendar-day resting HR over a span of readings, oldest day first. HR is bucketed
     /// by the local day of each reading's start; `sleep` segments are matched to a day by
     /// temporal overlap (so an early-morning night lands on the day you woke). Days with no
-    /// readings are omitted.
+    /// readings are omitted, and so are days below `daytimeCoverage` when one is given.
     public struct DailyValue: Equatable, Sendable {
         public let day: Date    // start-of-day (in `calendar`)
         public let bpm: Double
@@ -135,7 +175,8 @@ public enum RestingHR {
         sleep: [SleepSegment] = [],
         calendar: Calendar = .current,
         window: TimeInterval = sustainedWindow,
-        minSleepSamples: Int = minSleepSamples
+        minSleepSamples: Int = minSleepSamples,
+        daytimeCoverage: DaytimeCoverage? = nil
     ) -> [DailyValue] {
         guard !hr.isEmpty else { return [] }
         let byDay = Dictionary(grouping: hr) { calendar.startOfDay(for: $0.start) }
@@ -146,7 +187,7 @@ public enum RestingHR {
                 ?? day.addingTimeInterval(86_400)
             let daySleep = sleep.filter { $0.start < dayEnd && $0.end > day }
             if let v = value(hr: dayHR, sleep: daySleep, window: window,
-                             minSleepSamples: minSleepSamples) {
+                             minSleepSamples: minSleepSamples, daytimeCoverage: daytimeCoverage) {
                 out.append(DailyValue(day: day, bpm: v))
             }
         }
