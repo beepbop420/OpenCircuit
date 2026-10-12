@@ -165,12 +165,13 @@ final class CurrentDayWiringTests: XCTestCase {
         let (window, vc) = host(NavigationStack { CaloriesCardView(startWithProfileSheet: true) }.modelContainer(c),
                                 clock: clock, builds: builds)
         spin(1.0)
-        XCTAssertNotNil(vc.presentedViewController, "the Profile sheet did not present")
+        let sheetBefore = try XCTUnwrap(vc.presentedViewController, "the Profile sheet did not present")
         crossMidnight(clock, to: at(5, 0, 2))
-        spin(0.5)
+        spin(1.0)
         XCTAssertEqual(changes.days("calories"), [at(5, 0)], "the day moved")
         XCTAssertEqual(builds.days("calories"), [at(4, 0), at(5, 0)], "and the body was rebuilt")
-        XCTAssertNotNil(vc.presentedViewController, "a day change dismissed the Profile sheet")
+        XCTAssertTrue(vc.presentedViewController === sheetBefore,
+                      "a day change dismissed or re-presented the Profile sheet")
         withExtendedLifetime(window) {}
     }
 
