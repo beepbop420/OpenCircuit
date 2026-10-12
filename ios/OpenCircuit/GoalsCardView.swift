@@ -12,7 +12,29 @@ import SwiftUI
 import SwiftData
 import OpenCircuitKit
 
+/// The card as placed in the app: it follows the calendar day (#297), re-creating its body (and so
+/// its day-bound queries) when the day changes.
 struct GoalsCardView: View {
+    var body: some View {
+        CurrentDayView { GoalsCardBody(dayStart: $0) }
+    }
+}
+
+/// Today's heart-rate samples: that day only, so the query can never span two days (#297).
+enum GoalsCardQueries {
+    static func heartRate(dayStart: Date, calendar: Calendar = .current) -> FetchDescriptor<StoredSample> {
+        let hrKind = MetricKind.heartRate.rawValue
+        let dayEnd = DayRollover.nextDayStart(after: dayStart, calendar: calendar)
+        return FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == hrKind && $0.start >= dayStart && $0.start < dayEnd && $0.value > 0 },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+    }
+}
+
+private struct GoalsCardBody: View {
+
+    /// The day this instance was built for; `CurrentDayView` re-creates it when the day changes.
+    private let dayStart: Date
 
     // MARK: Goal settings (shared with UserProfileSettingsView / GoalDefaults)
     @AppStorage(GoalDefaults.workdaySteps)    private var workdaySteps    = GoalDefaults.defaultWorkdaySteps
@@ -52,10 +74,9 @@ struct GoalsCardView: View {
     /// have to show the same number.
     @Query private var recentStepSamples: [StoredStepSample]
 
-    init() {
-        let dayStart = Calendar.current.startOfDay(for: Date())
+    init(dayStart: Date) {
+        self.dayStart = dayStart
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
-        let hrKind = MetricKind.heartRate.rawValue
 
         _recentStepSamples = Query(FetchDescriptor<StoredStepSample>(
             predicate: #Predicate { $0.start >= stepsFrom },
@@ -71,10 +92,8 @@ struct GoalsCardView: View {
 
         // Count ALL of today's HR (no upper-hour cap) so this card matches CaloriesCardView and
         // doesn't lag up to 59 min behind it — e.g. right after an on-demand measurement. The
-        // stable `dayStart` lower bound already keeps the @Query descriptor stable.
-        _todayHR = Query(FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == hrKind && $0.start >= dayStart && $0.value > 0 },
-            sortBy: [SortDescriptor(\.start, order: .forward)]))
+        // stable `dayStart` bounds keep the @Query descriptor stable.
+        _todayHR = Query(GoalsCardQueries.heartRate(dayStart: dayStart))
 
         var sleepDesc = FetchDescriptor<StoredSleepSummary>(
             sortBy: [SortDescriptor(\.night, order: .reverse)])
@@ -239,7 +258,6 @@ struct GoalsCardView: View {
             let stepWindows = recentStepSamples.map {
                 StepWindow(start: $0.start, end: $0.end, delta: $0.delta)
             }
-            let dayStart = Calendar.current.startOfDay(for: Date())
             // #281 motion gate (off by default): the ring's own activity sessions.
             let activityIntervals = RingActivityEventLedger.load().corroboratingIntervals(now: Date())
             let creditedWorkoutIntervals = HealthKitWriter.workoutCreditedSpans(day: dayStart)

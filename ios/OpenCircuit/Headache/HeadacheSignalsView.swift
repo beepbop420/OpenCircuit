@@ -27,7 +27,15 @@ import OpenCircuitKit
 // permanent ~10 %-of-days anxiety generator with a 100 % false-positive rate for the many people
 // who simply don't get headaches (docs/HEADACHE_SIGNALS.md §6.1). The word stays on the log.
 
+/// The screen as pushed from the app: it follows the calendar day (#297), so the history window
+/// below is anchored to the current day rather than the day the screen was first created.
 struct HeadacheSignalsView: View {
+    var body: some View {
+        CurrentDayView { HeadacheSignalsBody(dayStart: $0) }
+    }
+}
+
+private struct HeadacheSignalsBody: View {
     @Environment(\.modelContext) private var modelContext
 
     /// The whole log, newest first. Unbounded on purpose — this IS the history screen, and the
@@ -75,8 +83,8 @@ struct HeadacheSignalsView: View {
     private static let riskLookbackDays = 730
     private static let riskFetchLimit = 800
 
-    init() {
-        let since = Calendar.current.startOfDay(for: Date())
+    init(dayStart: Date) {
+        let since = dayStart
             .addingTimeInterval(-Double(Self.riskLookbackDays) * 86_400)
         var desc = FetchDescriptor<StoredHeadacheRisk>(
             predicate: #Predicate { $0.day >= since },
