@@ -584,12 +584,25 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         XCTAssertEqual(series.last?.day, today)
         XCTAssertTrue(center.tempFeverCandidates(store: store, restingHRDaily: series).fever)
 
+        // The claim (`markFired`) is written BEFORE the authorization request, and in a test host that
+        // request can wait on a system prompt for good. So the ledger is judged while the pass runs,
+        // instead of only after it returns: a regression fails here rather than hanging.
         let noon = today.addingTimeInterval(12 * 3600)   // inside the 07:00-21:00 delivery window
-        await center.evaluate(store: store, session: nil, now: noon)
+        let pass = PassBox()
+        Task { await center.evaluate(store: store, session: nil, now: noon); pass.finished = true }
+        let deadline = Date().addingTimeInterval(60)
+        while !pass.finished, Date() < deadline,
+              HealthNotificationStore(ledger).lastFired()[.headacheSigns] == nil {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertNil(HealthNotificationStore(ledger).lastFired()[.headacheSigns],
                      "headache.signs was claimed on a fever morning")
+        XCTAssertTrue(pass.finished, "the alert pass did not return")
         XCTAssertTrue(HealthNotificationStore(ledger).lastFired().isEmpty)
     }
+
+    @MainActor
+    private final class PassBox { var finished = false }
 
     // MARK: 3. Measured: old main-actor read vs the new one (printed for the PR, not a benchmark)
 
