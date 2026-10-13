@@ -190,7 +190,13 @@ final class BackgroundAlertOffMainTests: XCTestCase {
 
     private struct Timing {
         let wallMS: Double
-        /// The longest the main actor went without a beat between the call and its return.
+        /// From the call to the first beat: the call's own synchronous main-actor prelude up to its first
+        /// suspension, plus whatever the test host had queued on the main thread before it. Reported,
+        /// not asserted: the host reacts on the main thread to `UserDefaults.register(defaults:)` and to
+        /// defaults writes, which `evaluate` and `snapshotParts` make (measured on this host with no
+        /// SwiftData involved: 120-400 ms after either).
+        let firstBeatMS: Double
+        /// The longest the main actor then went without a beat, until the call returned.
         let longestStallMS: Double
         let beats: Int
     }
@@ -203,16 +209,30 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         let t1 = DispatchTime.now().uptimeNanoseconds
         heartbeat.stop()
         let inside = heartbeat.beats.filter { $0 >= t0 && $0 <= t1 }
-        let marks = [t0] + inside + [t1]
-        let stall = zip(marks, marks.dropFirst()).map { $1 - $0 }.max() ?? (t1 - t0)
-        return (value, Timing(wallMS: Double(t1 - t0) / 1e6, longestStallMS: Double(stall) / 1e6, beats: inside.count))
+        guard let first = inside.first else {
+            let wall = Double(t1 - t0) / 1e6
+            return (value, Timing(wallMS: wall, firstBeatMS: wall, longestStallMS: wall, beats: 0))
+        }
+        let marks = inside + [t1]
+        let stall = zip(marks, marks.dropFirst()).map { $1 - $0 }.max() ?? 0
+        return (value, Timing(wallMS: Double(t1 - t0) / 1e6, firstBeatMS: Double(first - t0) / 1e6,
+                              longestStallMS: Double(stall) / 1e6, beats: inside.count))
+    }
+
+    /// Waits until the main actor has gone 100 ms with no gap over 25 ms (bounded), so a measurement
+    /// doesn't start inside the host's reaction to the fixture's save or to a defaults write.
+    private func settleMainActor() async {
+        for _ in 0..<100 {
+            let (_, t) = await underHeartbeat { try? await Task.sleep(nanoseconds: 100_000_000) }
+            if t.beats > 0, max(t.firstBeatMS, t.longestStallMS) < 25 { return }
+        }
     }
 
     /// The main actor kept beating through the read: at least a few beats, and no gap anywhere near the
     /// length of the read itself (a read moved back onto the main actor is ONE gap as long as the call).
     private func assertMainActorKeptRunning(_ t: Timing, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
-        print(String(format: "BG-ALERTS-TIMING %@: wall %.1f ms, longest main-actor stall %.1f ms, beats %d",
-                     what, t.wallMS, t.longestStallMS, t.beats))
+        print(String(format: "BG-ALERTS-TIMING %@: wall %.1f ms, first beat after %.1f ms, then longest main-actor stall %.1f ms, beats %d",
+                     what, t.wallMS, t.firstBeatMS, t.longestStallMS, t.beats))
         XCTAssertGreaterThanOrEqual(t.beats, 3, "\(what): the main actor never ran during the read (\(t))", file: file, line: line)
         XCTAssertLessThan(t.longestStallMS, t.wallMS * 0.5, "\(what): the main actor was blocked for most of the read (\(t))",
                           file: file, line: line)
@@ -274,6 +294,7 @@ final class BackgroundAlertOffMainTests: XCTestCase {
     func testTheRestingHRSeriesDoesNotBlockTheMainActor() async throws {
         let f = try fixture()
         ownership.install(DeviceOwnershipLog())
+        await settleMainActor()
         let (series, timing) = await underHeartbeat { await HealthNotificationCenter().restingHRDailySeries(store: f.store) }
         XCTAssertFalse(series.isEmpty)
         assertMainActorKeptRunning(timing, "restingHRDailySeries")
@@ -283,6 +304,7 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         let f = try fixture()
         ownership.install(DeviceOwnershipLog())
         let cal = Calendar.current
+        await settleMainActor()
         let (snapshot, timing) = await underHeartbeat {
             await HeadacheEngine.snapshotOffMain(store: f.store, day: cal.startOfDay(for: Date()), asOf: Date(),
                                                  restingHR: [], calendar: cal)
@@ -299,6 +321,7 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         ownership.install(DeviceOwnershipLog())
         UserDefaults.standard.set(true, forKey: HealthAlertDefaults.tempFeverEnabled)
         UserDefaults.standard.set(false, forKey: HeadacheDefaults.enabled)
+        await settleMainActor()
         let (_, timing) = await underHeartbeat {
             await HealthNotificationCenter().evaluate(store: f.store, session: nil)
         }
@@ -313,23 +336,27 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         _ = await HealthNotificationCenter().restingHRDailySeries(store: f.store)   // warm-up
         // The new read FIRST: the old one leaves ~46 k rows registered in the main context, and their
         // teardown would land on the main actor inside whichever measurement came next.
+        await settleMainActor()
         let (new, newTiming) = await underHeartbeat { await HealthNotificationCenter().restingHRDailySeries(store: f.store) }
+        await settleMainActor()
         let (old, oldTiming) = await underHeartbeat { self.mainActorSeries(f.store) }
         XCTAssertEqual(new, old)
-        print(String(format: "BG-ALERTS-TIMING rows=%d old(main actor): wall %.1f ms, longest main-actor stall %.1f ms; "
-                     + "new(off main): wall %.1f ms, longest main-actor stall %.1f ms, beats %d",
-                     f.hrRows, oldTiming.wallMS, oldTiming.longestStallMS,
-                     newTiming.wallMS, newTiming.longestStallMS, newTiming.beats))
-        XCTAssertLessThan(newTiming.longestStallMS, oldTiming.longestStallMS)
+        print(String(format: "BG-ALERTS-TIMING rows=%d old(main actor): wall %.1f ms, main actor blocked %.1f ms (no beat at all: %d beats); "
+                     + "new(off main): wall %.1f ms, first beat after %.1f ms, then longest main-actor stall %.1f ms, beats %d",
+                     f.hrRows, oldTiming.wallMS, oldTiming.firstBeatMS, oldTiming.beats,
+                     newTiming.wallMS, newTiming.firstBeatMS, newTiming.longestStallMS, newTiming.beats))
+        XCTAssertEqual(oldTiming.beats, 0)
+        XCTAssertLessThan(newTiming.longestStallMS, oldTiming.firstBeatMS)
 
         // What stays on the main actor in the alert pass: everything but the series (handed in here),
         // i.e. the 2 h instant-rule reads, the sleep summaries and the small Headache tables.
         UserDefaults.standard.set(true, forKey: HealthAlertDefaults.tempFeverEnabled)
         UserDefaults.standard.set(false, forKey: HeadacheDefaults.enabled)
+        await settleMainActor()
         let (_, passTiming) = await underHeartbeat {
             await HealthNotificationCenter().evaluate(store: f.store, session: nil, restingHRDaily: new)
         }
         print(String(format: "BG-ALERTS-TIMING evaluate with the series handed in (main-actor remainder): wall %.1f ms, "
-                     + "longest main-actor stall %.1f ms", passTiming.wallMS, passTiming.longestStallMS))
+                     + "first beat after %.1f ms, beats %d", passTiming.wallMS, passTiming.firstBeatMS, passTiming.beats))
     }
 }
