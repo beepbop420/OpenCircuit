@@ -430,9 +430,12 @@ struct HeadacheEngine {
         // Read the watermark BEFORE suspending: `night` is a live `@Model` reference and must not be
         // touched again after the `await` (the row can be re-staged, or deleted, under us).
         let sleepUpdatedAt = night.updatedAt
+        let nightKey = night.night
 
-        let snapshot = Self.snapshot(store: store, day: day, asOf: now,
-                                     restingHR: restingHR, calendar: cal)
+        // #305: the HR + HRV behind the score are the whole stored history (~30 days), read off the
+        // main actor.
+        let snapshot = await Self.snapshotOffMain(store: store, day: day, asOf: now,
+                                                  restingHR: restingHR, calendar: cal)
         let verdict = await Task.detached { HeadacheAssessmentBuilder.verdict(snapshot) }.value
         // Only a SCORED day gets a row. `.buildingBaseline` / `.interrupted` / `.insufficientData`
         // have no index, and writing a 0 for them would put a fabricated value into the very series
@@ -443,7 +446,7 @@ struct HeadacheEngine {
             day: day,
             // The timezone-stable identity of the night being scored, so this row can still be
             // found after the device changes timezone and `day` is recomputed differently.
-            nightKey: night.night,
+            nightKey: nightKey,
             index: Double(assessment.index),
             bandRaw: assessment.band.rawValue,
             ringFeatureCount: assessment.ringFeatureCount,
@@ -488,8 +491,9 @@ struct HeadacheEngine {
         let cal = Calendar.current
         let day = cal.startOfDay(for: now)
         let asOf = Self.frozenRow(store: store, day: day, calendar: cal)?.computedAt ?? now
-        let snapshot = Self.snapshot(store: store, day: day, asOf: asOf,
-                                     restingHR: [], calendar: cal)
+        // #305: the 62-day HR + HRV are read off the main actor, as on the freeze path.
+        let snapshot = await Self.snapshotOffMain(store: store, day: day, asOf: asOf,
+                                                  restingHR: [], calendar: cal)
         return await Task.detached { HeadacheAssessmentBuilder.verdict(snapshot) }.value
     }
 
@@ -528,12 +532,43 @@ struct HeadacheEngine {
             .max { $0.sleepEditCurrentInBedEnd < $1.sleepEditCurrentInBedEnd }
     }
 
-    /// Fetch every row the assessment needs and flatten it to Sendable values, ON THE MAIN ACTOR.
-    /// Nothing below this line may be touched from the detached task (`@Model` objects are not
-    /// Sendable, and reading one off-actor is the crash this shape exists to prevent).
-    static func snapshot(store: LocalStore, day: Date, asOf: Date,
-                         restingHR: [RestingHR.DailyValue],
-                         calendar: Calendar) -> HeadacheSnapshot {
+    /// Every input the assessment needs, flattened to Sendable values: the small reads on the main
+    /// actor (`snapshotParts`), then the one heavy read — the HR and HRV since `sampleLookbackDays`,
+    /// which is every stored row (samples prune at 30 days), ~43 k HR rows for a strap logging once a
+    /// minute — on a fresh `ModelContext` off the main actor (#305). Only value types cross.
+    ///
+    /// The only way to build a snapshot: the freeze (`freezeToday`) and the card (`todaysVerdict`) both
+    /// come through here. The synchronous main-actor version was removed so it can't come back.
+    static func snapshotOffMain(store: LocalStore, day: Date, asOf: Date,
+                                restingHR: [RestingHR.DailyValue],
+                                calendar: Calendar) async -> HeadacheSnapshot {
+        let parts = snapshotParts(store: store, day: day, asOf: asOf, calendar: calendar)
+        let samples = await snapshotSamples(container: store.container, parts.samples)
+        return parts.snapshot(samples: samples, restingHR: restingHR)
+    }
+
+    /// The HR and HRV the assessment reads: `device`'s own (decision 29) in `[from, to)`, through the
+    /// same `LocalStore.ownSamples(in:…)` core as the main-actor `ownSamples`. `async`, with the detached
+    /// task INSIDE, so there is no synchronous way to run it on the main actor.
+    nonisolated static func snapshotSamples(container: ModelContainer,
+                                            _ request: HeadacheSnapshotParts.SampleRequest) async -> HeadacheSnapshotParts.Samples {
+        await Task.detached {
+            let context = ModelContext(container)
+            let hr = ((try? LocalStore.ownSamples(in: context, kind: .heartRate, from: request.from, to: request.to,
+                                                  of: request.device, log: request.log)) ?? [])
+                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+            // 0 is a placeholder, not a measured HRV — dropping it here keeps a zero out of a baseline.
+            let hrv = ((try? LocalStore.ownSamples(in: context, kind: .hrvSDNN, from: request.from, to: request.to,
+                                                   of: request.device, log: request.log)) ?? [])
+                .filter { $0.value > 0 }
+            return HeadacheSnapshotParts.Samples(hr: hr, hrv: hrv)
+        }.value
+    }
+
+    /// Everything `snapshotOffMain` reads except the HR + HRV, on the main actor, flattened to values.
+    /// `@Model` rows are read here and never cross into the detached task (they are not Sendable).
+    static func snapshotParts(store: LocalStore, day: Date, asOf: Date,
+                              calendar: Calendar) -> HeadacheSnapshotParts {
         let defaults = UserDefaults.standard
         let end = nextDay(after: day, calendar)
 
@@ -554,13 +589,9 @@ struct HeadacheEngine {
         let tonight = nights.filter { $0.inBedEnd >= day && $0.inBedEnd < end }
             .max { $0.inBedEnd < $1.inBedEnd }
 
-        // Bounded by the predicate, and additionally by the 30-day sample retention.
+        // Bounded by the predicate, and additionally by the 30-day sample retention. Read by the caller
+        // (`snapshotSamples`), on the main actor or off it.
         let sampleStart = calendar.date(byAdding: .day, value: -sampleLookbackDays, to: day) ?? day
-        let hr = ((try? store.ownSamples(kind: .heartRate, from: sampleStart, to: asOf, of: device)) ?? [])
-            .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-        // 0 is a placeholder, not a measured HRV — dropping it here keeps a zero out of a baseline.
-        let hrv = ((try? store.ownSamples(kind: .hrvSDNN, from: sampleStart, to: asOf, of: device)) ?? [])
-            .filter { $0.value > 0 }
 
         // The banding budget is a TRAILING-60-DAY window, not the last 60 rows: it exists to
         // re-calibrate within 60 days of a life change, and a user with gaps should not be judged
@@ -603,15 +634,13 @@ struct HeadacheEngine {
                 nightEndingNear: wake, calendar: calendar)?.start
         }()
 
-        return HeadacheSnapshot(
+        return HeadacheSnapshotParts(
             day: day,
             now: asOf,
             lastRingDataAt: ringEpoch > 0 ? Date(timeIntervalSince1970: ringEpoch) : nil,
             nights: nights,
             tonight: tonight,
-            hr: hr,
-            hrv: hrv,
-            providedRestingHR: restingHR,
+            samples: .init(from: sampleStart, to: asOf, device: device, log: log),
             periods: periods,
             womensHealthEnabled: defaults.bool(forKey: womensHealthEnabledKey),
             scheduledBedtime: scheduledBedtime,
@@ -621,6 +650,52 @@ struct HeadacheEngine {
 
     private static func nextDay(after day: Date, _ calendar: Calendar) -> Date {
         calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+    }
+}
+
+/// `HeadacheEngine.snapshotParts`: every input of a `HeadacheSnapshot` except the HR and HRV, plus the
+/// bounds of that read (#305). Plain values, so it can wait across the off-main read.
+struct HeadacheSnapshotParts: Sendable {
+    /// The HR + HRV read: `device`'s own readings in `[from, to)` under `log`.
+    struct SampleRequest: Sendable {
+        let from: Date
+        let to: Date
+        let device: DeviceOwnershipLog.Family
+        let log: DeviceOwnershipLog
+    }
+
+    struct Samples: Sendable {
+        let hr: [HRSample]
+        let hrv: [QuantitySample]
+    }
+
+    let day: Date
+    let now: Date
+    let lastRingDataAt: Date?
+    let nights: [HeadacheNightRow]
+    let tonight: HeadacheNightRow?
+    let samples: SampleRequest
+    let periods: [CyclePredictor.PeriodEntry]
+    let womensHealthEnabled: Bool
+    let scheduledBedtime: Date?
+    let headacheAlreadyLoggedToday: Bool
+    let priorIndices: [Int]
+
+    func snapshot(samples read: Samples, restingHR: [RestingHR.DailyValue]) -> HeadacheSnapshot {
+        HeadacheSnapshot(
+            day: day,
+            now: now,
+            lastRingDataAt: lastRingDataAt,
+            nights: nights,
+            tonight: tonight,
+            hr: read.hr,
+            hrv: read.hrv,
+            providedRestingHR: restingHR,
+            periods: periods,
+            womensHealthEnabled: womensHealthEnabled,
+            scheduledBedtime: scheduledBedtime,
+            headacheAlreadyLoggedToday: headacheAlreadyLoggedToday,
+            priorIndices: priorIndices)
     }
 }
 
@@ -883,7 +958,7 @@ enum HeadacheMonitorBuilder {
             return HeadacheEvaluation.ScoredDay(
                 day: row.day,
                 computedAt: row.computedAt,
-                // Rounded to Int exactly as `HeadacheEngine.snapshot` rounds it for `priorIndices`,
+                // Rounded to Int exactly as `HeadacheEngine.snapshotParts` rounds it for `priorIndices`,
                 // so the series the monitor ranks is the series the banding budget was drawn from.
                 // Two different roundings of one column would let the flagged days and the ranked
                 // days disagree at the margin.
@@ -1092,7 +1167,7 @@ extension HeadacheEngine {
     /// below that line no day can ever be `.flagged` and there is literally nothing to notify about.
     ///
     /// Asked over the TRAILING BANDING WINDOW, excluding today, because that is what this app
-    /// actually feeds `band`: `snapshot` builds `priorIndices` from `riskDays(from: bandStart, to:
+    /// actually feeds `band`: `snapshotParts` builds `priorIndices` from `riskDays(from: bandStart, to:
     /// day)` — the trailing `bandWindowDays` CALENDAR days, not the last 60 rows. So this is the
     /// exact condition under which a `.flagged` day becomes possible, which is the only honest
     /// moment to tell a user their alerts are on. `HeadacheEvaluation.status` measures `.building`

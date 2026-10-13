@@ -3927,7 +3927,7 @@ final class RingSession: NSObject {
                 // missing series — the engine is simply not called.
                 let alerts = HealthNotificationCenter()
                 let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
-                    ? alerts.restingHRDailySeries(store: localStore) : nil
+                    ? await alerts.restingHRDailySeries(store: localStore) : nil
                 if let restingHRDaily {
                     await HeadacheEngine().refreshToday(store: localStore, restingHR: restingHRDaily)
                 }

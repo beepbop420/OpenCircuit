@@ -131,7 +131,7 @@ private enum SleepFocusSyncRunner {
             // twice; opted out, this short system wake costs exactly what it did before #183.
             let alerts = HealthNotificationCenter()
             let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
-                ? alerts.restingHRDailySeries(store: store) : nil
+                ? await alerts.restingHRDailySeries(store: store) : nil
             if let restingHRDaily {
                 await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
             }
@@ -167,7 +167,7 @@ private enum SleepFocusSyncRunner {
         if run.ending == .synced {
             let alerts = HealthNotificationCenter()
             let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
-                ? alerts.restingHRDailySeries(store: store) : nil
+                ? await alerts.restingHRDailySeries(store: store) : nil
             if let restingHRDaily {
                 await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
             }

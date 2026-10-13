@@ -94,7 +94,7 @@ final class PerDeviceBaselineTests: XCTestCase {
                        "mixed with the ring's nights, the strap's first night would have fired")
     }
 
-    func testEachConsumerKeepsToItsOwnDevice() throws {
+    func testEachConsumerKeepsToItsOwnDevice() async throws {
         let container = try makeContainer()
         let store = LocalStore(container.mainContext)
         let log = try ringThenStrap(store)
@@ -124,8 +124,8 @@ final class PerDeviceBaselineTests: XCTestCase {
         XCTAssertNotNil(HealthKitWriter.restingEnergyInputs(forDay: day(0), from: daily).baseline)
 
         // Headache: the strap night's day is scored against the strap's nights only.
-        let snapshot = HeadacheEngine.snapshot(store: store, day: day(0), asOf: day(0).addingTimeInterval(10 * 3600),
-                                               restingHR: [], calendar: calendar)
+        let snapshot = await HeadacheEngine.snapshotOffMain(store: store, day: day(0), asOf: day(0).addingTimeInterval(10 * 3600),
+                                                            restingHR: [], calendar: calendar)
         XCTAssertEqual(snapshot.nights.count, 1)
 
         // Apple Health fallback: the strap takes only its own writes; the ring everything else.
@@ -186,7 +186,8 @@ final class PerDeviceBaselineTests: XCTestCase {
         // Alerts: the fever pass judges every night, as before (the jump fires).
         XCTAssertFalse(HealthNotificationCenter().tempFeverCandidates(store: store, restingHRDaily: []).candidates.isEmpty)
         // Headache: every night.
-        XCTAssertEqual(HeadacheEngine.snapshot(store: store, day: day(0), asOf: day(0).addingTimeInterval(10 * 3600),
-                                               restingHR: [], calendar: calendar).nights.count, rows.count)
+        let snapshot = await HeadacheEngine.snapshotOffMain(store: store, day: day(0), asOf: day(0).addingTimeInterval(10 * 3600),
+                                                            restingHR: [], calendar: calendar)
+        XCTAssertEqual(snapshot.nights.count, rows.count)
     }
 }

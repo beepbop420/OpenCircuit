@@ -837,6 +837,10 @@ struct LocalStore {
         self.ownedContainer = container
     }
 
+    /// The container behind `context`, for a reader that must run off the main actor on its own
+    /// `ModelContext` (#305). The caller holds it for as long as that read runs.
+    var container: ModelContainer { ownedContainer ?? context.container }
+
     // MARK: Shared fetch descriptors
     //
     // `nonisolated` so the SAME descriptor can be run on the main-actor `context` (the instance
@@ -1327,11 +1331,15 @@ struct LocalStore {
     /// it never scans all history — used by the health-alert engine (#73/#85) to evaluate recent
     /// HR/SpO2 readings against the user's thresholds.
     func recentSamples(kind: MetricKind, since: Date) throws -> [QuantitySample] {
+        try context.fetch(Self.recentSamplesDescriptor(kind: kind, since: since)).compactMap(\.sample)
+    }
+
+    /// The `recentSamples` / `recentOwnSamples` descriptor, shared with the off-main reader (#305).
+    nonisolated static func recentSamplesDescriptor(kind: MetricKind, since: Date) -> FetchDescriptor<StoredSample> {
         let kindRaw = kind.rawValue
-        let descriptor = FetchDescriptor<StoredSample>(
+        return FetchDescriptor<StoredSample>(
             predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
             sortBy: [SortDescriptor(\.start, order: .forward)])
-        return try context.fetch(descriptor).compactMap(\.sample)
     }
 
     /// Decision 29: `samples(kind:from:to:)` measured by `family` during its own time (exactly
@@ -1356,13 +1364,16 @@ struct LocalStore {
     /// usual" that is that device's own (a ring's and a strap's readings are never one baseline).
     /// Exactly `recentSamples` with an empty log.
     func recentOwnSamples(kind: MetricKind, since: Date) throws -> [QuantitySample] {
-        let log = Self.ownershipLog()
-        guard !log.isEmpty else { return try recentSamples(kind: kind, since: since) }
-        let kindRaw = kind.rawValue
-        let descriptor = FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
-            sortBy: [SortDescriptor(\.start, order: .forward)])
-        return try context.fetch(descriptor)
+        try Self.recentOwnSamples(in: context, kind: kind, since: since, log: Self.ownershipLog())
+    }
+
+    /// The nonisolated core of `recentOwnSamples(kind:since:)` — see `ownedSamples(in:…)`. The resting-HR
+    /// series the alert passes read runs it on a background `ModelContext` (#305).
+    nonisolated static func recentOwnSamples(in context: ModelContext, kind: MetricKind, since: Date,
+                                             log: DeviceOwnershipLog) throws -> [QuantitySample] {
+        let rows = try context.fetch(recentSamplesDescriptor(kind: kind, since: since))
+        guard !log.isEmpty else { return rows.compactMap(\.sample) }
+        return rows
             .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: log.currentFamily) }
             .compactMap(\.sample)
     }
