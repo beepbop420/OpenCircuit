@@ -958,7 +958,7 @@ enum HeadacheMonitorBuilder {
             return HeadacheEvaluation.ScoredDay(
                 day: row.day,
                 computedAt: row.computedAt,
-                // Rounded to Int exactly as `HeadacheEngine.snapshot` rounds it for `priorIndices`,
+                // Rounded to Int exactly as `HeadacheEngine.snapshotParts` rounds it for `priorIndices`,
                 // so the series the monitor ranks is the series the banding budget was drawn from.
                 // Two different roundings of one column would let the flagged days and the ranked
                 // days disagree at the margin.
@@ -1167,7 +1167,7 @@ extension HeadacheEngine {
     /// below that line no day can ever be `.flagged` and there is literally nothing to notify about.
     ///
     /// Asked over the TRAILING BANDING WINDOW, excluding today, because that is what this app
-    /// actually feeds `band`: `snapshot` builds `priorIndices` from `riskDays(from: bandStart, to:
+    /// actually feeds `band`: `snapshotParts` builds `priorIndices` from `riskDays(from: bandStart, to:
     /// day)` — the trailing `bandWindowDays` CALENDAR days, not the last 60 rows. So this is the
     /// exact condition under which a `.flagged` day becomes possible, which is the only honest
     /// moment to tell a user their alerts are on. `HeadacheEvaluation.status` measures `.building`

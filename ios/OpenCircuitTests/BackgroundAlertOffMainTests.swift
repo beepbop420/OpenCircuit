@@ -346,6 +346,10 @@ final class BackgroundAlertOffMainTests: XCTestCase {
                                     "\(what): the main actor ran for only a sliver of the call (\(t))", file: file, line: line)
         XCTAssertLessThan(t.longestStallMS, t.wallMS * 0.5, "\(what): the main actor was blocked for most of the read (\(t))",
                           file: file, line: line)
+        // A main-actor read BEFORE the pass's first suspension shows up only as a late first beat (the
+        // stall above is measured from the first beat on), so bound the prelude too (#305 review).
+        XCTAssertLessThan(t.firstBeatMS, t.wallMS * 0.5,
+                          "\(what): the main actor was blocked before the pass first suspended (\(t))", file: file, line: line)
     }
 
     // MARK: 1. Same results

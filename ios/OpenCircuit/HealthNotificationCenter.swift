@@ -647,7 +647,7 @@ struct HealthNotificationCenter {
         let cal = Calendar.current
         let day = cal.startOfDay(for: now)
         let tuning = HeadacheSignals.Tuning()
-        // Counted over the SAME trailing window the band was taken against (`HeadacheEngine.snapshot`
+        // Counted over the SAME trailing window the band was taken against (`HeadacheEngine.snapshotParts`
         // builds `priorIndices` from exactly this range). A lifetime count would unlock a user whose
         // 21 rows are spread over two years and whose percentile budget is therefore built on almost
         // nothing. `riskDays` is `[from, to)`, so today's own row is excluded — the same convention
