@@ -19,16 +19,26 @@ import OpenCircuitKit
 final class BackgroundAlertOffMainTests: XCTestCase {
 
     private let ownership = OwnershipOverride()
-    private let savedDefaults: [String: Any?] = [
-        HealthAlertDefaults.tempFeverEnabled: UserDefaults.standard.object(forKey: HealthAlertDefaults.tempFeverEnabled),
-        HeadacheDefaults.enabled: UserDefaults.standard.object(forKey: HeadacheDefaults.enabled),
-    ]
+    /// Every persisted `headache.*` / `alerts.*` value before the test: the passes driven here read and
+    /// write those (the Headache monitor, the notification ledgers), and they are put back exactly.
+    private var savedDefaults: [String: Any] = [:]
+
+    private static func trackedDefaults() -> [String: Any] {
+        let domain = UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "") ?? [:]
+        return domain.filter { $0.key.hasPrefix("headache.") || $0.key.hasPrefix("alerts.") }
+    }
+
+    override func setUp() {
+        super.setUp()
+        savedDefaults = Self.trackedDefaults()
+    }
 
     override func tearDown() {
         ownership.restore()
-        for (key, value) in savedDefaults {
-            if let value { UserDefaults.standard.set(value, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+        for key in Self.trackedDefaults().keys where savedDefaults[key] == nil {
+            UserDefaults.standard.removeObject(forKey: key)
         }
+        for (key, value) in savedDefaults { UserDefaults.standard.set(value, forKey: key) }
         super.tearDown()
     }
 
@@ -156,15 +166,109 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         return RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).sorted { $0.day < $1.day }
     }
 
-    /// `HeadacheEngine.snapshot`'s HR + HRV read, through the main-actor `LocalStore.ownSamples`.
-    private func mainActorSnapshotSamples(_ store: LocalStore, day: Date, asOf: Date,
-                                          device: DeviceOwnershipLog.Family) -> (hr: [HRSample], hrv: [QuantitySample]) {
-        let sampleStart = Calendar.current.date(byAdding: .day, value: -HeadacheEngine.sampleLookbackDays, to: day) ?? day
+    /// `HeadacheEngine.snapshot(store:day:asOf:restingHR:calendar:)` as it was at 4e10948 — the synchronous,
+    /// main-actor read the freeze and the card used — copied verbatim (its private `nextDay` and the
+    /// engine's constants made local). Nothing in the app shares this code any more.
+    private func legacySnapshot(store: LocalStore, day: Date, asOf: Date,
+                                restingHR: [RestingHR.DailyValue],
+                                calendar: Calendar) -> HeadacheSnapshot {
+        func nextDay(after day: Date, _ calendar: Calendar) -> Date {
+            calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        }
+        let nightsFetchLimit = HeadacheEngine.nightsFetchLimit
+        let sampleLookbackDays = HeadacheEngine.sampleLookbackDays
+        let womensHealthEnabledKey = HeadacheEngine.womensHealthEnabledKey
+        let defaults = UserDefaults.standard
+        let end = nextDay(after: day, calendar)
+
+        // Decision 29: the day is judged only against its own device's history: the device of the night
+        // it scores (else the current one). With an empty log that is the ring for everything, and
+        // every filter below keeps every row.
+        let log = LocalStore.ownershipLog()
+        let storedNights = (try? store.recentSleepSummaries(limit: nightsFetchLimit)) ?? []
+        let device = storedNights.filter { $0.inBedEnd >= day && $0.inBedEnd < end }
+            .max { $0.inBedEnd < $1.inBedEnd }
+            .map { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) } ?? log.currentFamily
+        let nightOwners = Dictionary(storedNights.map { (calendar.startOfDay(for: $0.night),
+                                                         log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)) },
+                                     uniquingKeysWith: { first, _ in first })
+        let nights = log.only(device, storedNights, time: \.inBedStart)
+            .map(HeadacheNightRow.init)
+            .sorted { $0.night < $1.night }
+        let tonight = nights.filter { $0.inBedEnd >= day && $0.inBedEnd < end }
+            .max { $0.inBedEnd < $1.inBedEnd }
+
+        // Bounded by the predicate, and additionally by the 30-day sample retention.
+        let sampleStart = calendar.date(byAdding: .day, value: -sampleLookbackDays, to: day) ?? day
         let hr = ((try? store.ownSamples(kind: .heartRate, from: sampleStart, to: asOf, of: device)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        // 0 is a placeholder, not a measured HRV — dropping it here keeps a zero out of a baseline.
         let hrv = ((try? store.ownSamples(kind: .hrvSDNN, from: sampleStart, to: asOf, of: device)) ?? [])
             .filter { $0.value > 0 }
-        return (hr, hrv)
+
+        // The banding budget is a TRAILING-60-DAY window, not the last 60 rows: it exists to
+        // re-calibrate within 60 days of a life change, and a user with gaps should not be judged
+        // against months-old days (§3.7). `riskDays` is `[from, to)`, so today is excluded.
+        let bandStart = calendar.date(byAdding: .day,
+                                      value: -HeadacheSignals.Tuning().bandWindowDays,
+                                      to: day) ?? day
+        // Decision 29: only days scored on the same device's nights (each day's night, else its noon).
+        let priorIndices = ((try? store.riskDays(from: bandStart, to: day)) ?? [])
+            .filter { risk in
+                log.isEmpty || (nightOwners[calendar.startOfDay(for: risk.nightKey)]
+                    ?? log.owner(at: calendar.startOfDay(for: risk.day).addingTimeInterval(12 * 3600))) == device
+            }
+            .map { Int($0.index.rounded()) }
+
+        // "Already having one" suppression. A severity-1 (`notPresent`) entry records the ABSENCE of
+        // a headache — the same distinction the Apple Health import refuses to blur
+        // (`HeadacheCardView.swift:235`) — so it must not suppress anything.
+        let loggedToday = ((try? store.headacheEntries(from: day, to: end)) ?? [])
+            .contains { $0.onset <= asOf && $0.severityRaw != 1 }
+
+        let periods = ((try? store.allPeriodEntries()) ?? [])
+            .map { CyclePredictor.PeriodEntry(start: $0.start, end: $0.end) }
+
+        // Durable "the ring last delivered something" watermark, written by RingSession on every data
+        // frame (`RingSession.swift:3423`). Stored as epoch seconds; 0 = never.
+        let ringEpoch = defaults.double(forKey: ReminderDefaults.lastRingDataAt)
+
+        // Scheduled bedtime for the truncation test — MANUAL schedule only, exactly as the sleep
+        // card's truncation hint does it (`SleepCardView.swift:386-402`). No HealthKit query: this
+        // runs on wake paths that must not block, and with no schedule `SleepCaptureCoverage`
+        // correctly declines to guess rather than mistaking a short night for a truncated one.
+        SleepScheduleDefaults.register(defaults)
+        let scheduledBedtime: Date? = {
+            guard defaults.bool(forKey: SleepScheduleDefaults.enabled),
+                  let wake = tonight?.inBedEnd else { return nil }
+            return SleepWindow.interval(
+                bedMinutes: defaults.integer(forKey: SleepScheduleDefaults.bedMinutes),
+                wakeMinutes: defaults.integer(forKey: SleepScheduleDefaults.wakeMinutes),
+                nightEndingNear: wake, calendar: calendar)?.start
+        }()
+
+        return HeadacheSnapshot(
+            day: day,
+            now: asOf,
+            lastRingDataAt: ringEpoch > 0 ? Date(timeIntervalSince1970: ringEpoch) : nil,
+            nights: nights,
+            tonight: tonight,
+            hr: hr,
+            hrv: hrv,
+            providedRestingHR: restingHR,
+            periods: periods,
+            womensHealthEnabled: defaults.bool(forKey: womensHealthEnabledKey),
+            scheduledBedtime: scheduledBedtime,
+            headacheAlreadyLoggedToday: loggedToday,
+            priorIndices: priorIndices)
+    }
+
+    /// `HeadacheEngine.todaysVerdict` as it was at 4e10948, on `legacySnapshot`.
+    private func legacyTodaysVerdict(store: LocalStore, now: Date) -> HeadacheSignals.Verdict {
+        let cal = Calendar.current
+        let day = cal.startOfDay(for: now)
+        let asOf = HeadacheEngine.frozenRow(store: store, day: day, calendar: cal)?.computedAt ?? now
+        return HeadacheAssessmentBuilder.verdict(legacySnapshot(store: store, day: day, asOf: asOf, restingHR: [], calendar: cal))
     }
 
     // MARK: Main-actor heartbeat
@@ -228,12 +332,18 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         }
     }
 
-    /// The main actor kept beating through the read: at least a few beats, and no gap anywhere near the
-    /// length of the read itself (a read moved back onto the main actor is ONE gap as long as the call).
+    /// The main actor kept beating through the read:
+    ///  - at least a few beats, and at least one per 20 ms of the call on average (a free main actor beats
+    ///    about every 2 ms here). A heavy read on the main actor ANYWHERE in the call, including before
+    ///    its first suspension, leaves a pass with almost no beats;
+    ///  - no gap after the first beat anywhere near the length of the call (a read moved back onto the
+    ///    main actor mid-call is ONE gap as long as the read).
     private func assertMainActorKeptRunning(_ t: Timing, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
         print(String(format: "BG-ALERTS-TIMING %@: wall %.1f ms, first beat after %.1f ms, then longest main-actor stall %.1f ms, beats %d",
                      what, t.wallMS, t.firstBeatMS, t.longestStallMS, t.beats))
         XCTAssertGreaterThanOrEqual(t.beats, 3, "\(what): the main actor never ran during the read (\(t))", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(Double(t.beats), t.wallMS / 20,
+                                    "\(what): the main actor ran for only a sliver of the call (\(t))", file: file, line: line)
         XCTAssertLessThan(t.longestStallMS, t.wallMS * 0.5, "\(what): the main actor was blocked for most of the read (\(t))",
                           file: file, line: line)
     }
@@ -257,7 +367,7 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         XCTAssertNotEqual(seen[1], seen[2])
     }
 
-    func testTheOffMainHeadacheSnapshotEqualsTheMainActorOneUnderEveryOwnershipLog() async throws {
+    func testTheOffMainHeadacheSnapshotEqualsTheOldMainActorOneUnderEveryOwnershipLog() async throws {
         let f = try fixture()
         let cal = Calendar.current
         let day = cal.startOfDay(for: Date())
@@ -265,27 +375,36 @@ final class BackgroundAlertOffMainTests: XCTestCase {
         let restingHR = [RestingHR.DailyValue(day: day, bpm: 57)]
         for (name, log) in logs(f) {
             ownership.install(log)
-            let onMain = HeadacheEngine.snapshot(store: f.store, day: day, asOf: asOf, restingHR: restingHR, calendar: cal)
-            let parts = HeadacheEngine.snapshotParts(store: f.store, day: day, asOf: asOf, calendar: cal)
-            let reference = mainActorSnapshotSamples(f.store, day: day, asOf: asOf, device: parts.samples.device)
-            let offMain = await HeadacheEngine.snapshotOffMain(store: f.store, day: day, asOf: asOf,
-                                                               restingHR: restingHR, calendar: cal)
-            XCTAssertGreaterThan(reference.hr.count, 1_000, name)
-            XCTAssertEqual(offMain.hr, reference.hr, name)
-            XCTAssertEqual(offMain.hrv, reference.hrv, name)
-            XCTAssertEqual(onMain.hr, reference.hr, name)
-            XCTAssertEqual(onMain.hrv, reference.hrv, name)
-            XCTAssertEqual(offMain.day, onMain.day, name)
-            XCTAssertEqual(offMain.now, onMain.now, name)
-            XCTAssertEqual(offMain.lastRingDataAt, onMain.lastRingDataAt, name)
-            XCTAssertEqual(offMain.nights, onMain.nights, name)
-            XCTAssertEqual(offMain.tonight, onMain.tonight, name)
-            XCTAssertEqual(offMain.providedRestingHR, restingHR, name)
-            XCTAssertEqual(offMain.periods, onMain.periods, name)
-            XCTAssertEqual(offMain.womensHealthEnabled, onMain.womensHealthEnabled, name)
-            XCTAssertEqual(offMain.scheduledBedtime, onMain.scheduledBedtime, name)
-            XCTAssertEqual(offMain.headacheAlreadyLoggedToday, onMain.headacheAlreadyLoggedToday, name)
-            XCTAssertEqual(offMain.priorIndices, onMain.priorIndices, name)
+            let old = legacySnapshot(store: f.store, day: day, asOf: asOf, restingHR: restingHR, calendar: cal)
+            let new = await HeadacheEngine.snapshotOffMain(store: f.store, day: day, asOf: asOf,
+                                                           restingHR: restingHR, calendar: cal)
+            XCTAssertGreaterThan(old.hr.count, 1_000, name)
+            XCTAssertEqual(new.hr, old.hr, name)
+            XCTAssertEqual(new.hrv, old.hrv, name)
+            XCTAssertEqual(new.day, old.day, name)
+            XCTAssertEqual(new.now, old.now, name)
+            XCTAssertEqual(new.lastRingDataAt, old.lastRingDataAt, name)
+            XCTAssertEqual(new.nights, old.nights, name)
+            XCTAssertEqual(new.tonight, old.tonight, name)
+            XCTAssertEqual(new.providedRestingHR, old.providedRestingHR, name)
+            XCTAssertEqual(new.periods, old.periods, name)
+            XCTAssertEqual(new.womensHealthEnabled, old.womensHealthEnabled, name)
+            XCTAssertEqual(new.scheduledBedtime, old.scheduledBedtime, name)
+            XCTAssertEqual(new.headacheAlreadyLoggedToday, old.headacheAlreadyLoggedToday, name)
+            XCTAssertEqual(new.priorIndices, old.priorIndices, name)
+        }
+    }
+
+    /// The card's verdict (`todaysVerdict`, now on `snapshotOffMain`) equals the old main-actor one.
+    func testTheCardVerdictEqualsTheOldMainActorOneUnderEveryOwnershipLog() async throws {
+        let f = try fixture()
+        UserDefaults.standard.set(true, forKey: HeadacheDefaults.enabled)
+        let now = Date()
+        for (name, log) in logs(f) {
+            ownership.install(log)
+            let old = legacyTodaysVerdict(store: f.store, now: now)
+            let new = await HeadacheEngine().todaysVerdict(store: f.store, now: now)
+            XCTAssertEqual(new, old, name)
         }
     }
 
@@ -326,6 +445,150 @@ final class BackgroundAlertOffMainTests: XCTestCase {
             await HealthNotificationCenter().evaluate(store: f.store, session: nil)
         }
         assertMainActorKeptRunning(timing, "evaluate")
+    }
+
+    // MARK: 2b. The real passes (the #305 crash path), not just the helpers
+
+    /// `AppDelegate.evaluateBodyAlerts` — what the strap catch-up's `afterRun` and `bodyAlertPass` run —
+    /// with Headache on, so it reads the resting-HR series. Today is already frozen here, so the freeze
+    /// takes its early return and the series is the pass's one heavy read (the freeze has its own test
+    /// below). Headache alerts are marked retired for this pass, so nothing can be posted.
+    func testTheStrapBodyAlertPassDoesNotBlockTheMainActor() async throws {
+        let f = try fixture()
+        ownership.install(DeviceOwnershipLog())
+        UserDefaults.standard.set(true, forKey: HeadacheDefaults.enabled)
+        UserDefaults.standard.set(true, forKey: HealthNotificationCenter.headacheRetiredKey)
+        try freezeToday(f)
+        await settleMainActor()
+        let (_, timing) = await underHeartbeat { await AppDelegate.evaluateBodyAlerts(store: f.store) }
+        assertMainActorKeptRunning(timing, "evaluateBodyAlerts")
+    }
+
+    /// `HeadacheEngine.refreshToday` on a day that is not frozen yet and whose night has settled, so the
+    /// freeze reads its 62 days of HR + HRV (`snapshotOffMain`).
+    func testTheHeadacheFreezePassDoesNotBlockTheMainActor() async throws {
+        let f = try fixture()
+        ownership.install(DeviceOwnershipLog())
+        UserDefaults.standard.set(true, forKey: HeadacheDefaults.enabled)
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let now = today.addingTimeInterval(11 * 3600)   // the fixture's night ends 07:00; settled after 10:00
+        try unfreezeToday(f)
+        // The freeze must reach the heavy read for this to mean anything.
+        XCTAssertNil(HeadacheEngine.frozenRow(store: f.store, day: today, calendar: cal))
+        let night = try XCTUnwrap(HeadacheEngine.nightEnding(on: today, store: f.store, calendar: cal))
+        XCTAssertGreaterThanOrEqual(now, night.sleepEditCurrentInBedEnd
+            .addingTimeInterval(TimeInterval(HeadacheEngine.settleMarginMinutes) * 60))
+        let series = await HealthNotificationCenter().restingHRDailySeries(store: f.store)
+        await settleMainActor()
+        let (_, timing) = await underHeartbeat {
+            await HeadacheEngine().refreshToday(store: f.store, restingHR: series, now: now)
+        }
+        assertMainActorKeptRunning(timing, "refreshToday")
+    }
+
+    /// The Headache card's load (`todaysVerdict`, from the card's `.task`).
+    func testTheCardVerdictDoesNotBlockTheMainActor() async throws {
+        let f = try fixture()
+        ownership.install(DeviceOwnershipLog())
+        UserDefaults.standard.set(true, forKey: HeadacheDefaults.enabled)
+        await settleMainActor()
+        let (verdict, timing) = await underHeartbeat { await HeadacheEngine().todaysVerdict(store: f.store) }
+        XCTAssertNotNil(verdict)
+        assertMainActorKeptRunning(timing, "todaysVerdict")
+    }
+
+    private func todaysRiskRows(_ f: Fixture) throws -> [StoredHeadacheRisk] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let tomorrow = cal.date(byAdding: .day, value: 1, to: today)!
+        return try f.store.riskDays(from: today, to: tomorrow)
+    }
+
+    private func freezeToday(_ f: Fixture) throws {
+        guard try todaysRiskRows(f).isEmpty else { return }
+        let today = Calendar.current.startOfDay(for: Date())
+        try f.store.insertRiskDayIfAbsent(StoredHeadacheRisk(day: today, nightKey: today, index: 40, bandRaw: 0,
+                                                             ringFeatureCount: 4, coverageFraction: 0.9,
+                                                             contributionsJSON: "{}", absentJSON: "{}",
+                                                             computedAt: today.addingTimeInterval(11 * 3600)))
+    }
+
+    private func unfreezeToday(_ f: Fixture) throws {
+        for row in try todaysRiskRows(f) { f.store.context.delete(row) }
+        try f.store.context.save()
+    }
+
+    // MARK: 2c. The Headache arm of the prefetch (review of #306, SF1)
+
+    /// Temp alerts OFF, Headache ON, no series handed in (the foreground pass, or any caller that doesn't
+    /// run the engine), a flagged frozen day, a fever-level skin-temperature offset and resting HR 18 bpm
+    /// over the usual. The fever suppresses the morning `headache.signs`, exactly as before #305: the
+    /// series must be read for the fever check even though the temp alerts are off. Without it the
+    /// fever check sees no series, says "no fever", and `headache.signs` is claimed and posted.
+    func testFeverStillSuppressesTheHeadacheAlertWhenOnlyHeadacheNeedsTheSeries() async throws {
+        ownership.install(DeviceOwnershipLog())
+        UserDefaults.standard.set(false, forKey: HealthAlertDefaults.tempFeverEnabled)
+        UserDefaults.standard.set(true, forKey: HeadacheDefaults.enabled)
+        UserDefaults.standard.removeObject(forKey: HealthNotificationCenter.headacheRetiredKey)
+
+        let container = try ModelContainer(
+            for: StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
+            StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
+            StoredHeadacheEntry.self, StoredHeadacheRisk.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let store = LocalStore(container.mainContext)
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        func day(_ back: Int) -> Date { cal.date(byAdding: .day, value: -back, to: today)! }
+
+        // Ring HR, midnight to noon in 150 s epochs with a resting block at 03:00: a usual 55 bpm, then
+        // today at 73 (+18). Inserted directly: today's epochs can be later than the real clock.
+        for back in 0...14 {
+            let usual = back == 0 ? 73 : 55
+            for i in 0..<289 {
+                let t = day(back).addingTimeInterval(Double(i) * 150)
+                store.context.insert(StoredSample(kindRaw: MetricKind.heartRate.rawValue, start: t, end: t,
+                                                  value: Double((72...83).contains(i) ? usual : usual + 12)))
+            }
+        }
+        try store.context.save()
+        // Fourteen nights at 33.0 °C, then last night at 34.6 °C: a fever-level offset.
+        for back in 0...14 {
+            let start = day(back).addingTimeInterval(-3600), end = day(back).addingTimeInterval(7 * 3600)
+            let segments = [SleepSegment(start: start, end: end, stage: .asleepCore)]
+            var extras = LocalStore.SleepNightExtras()
+            extras.hypnogram = segments
+            extras.skinTempC = back == 0 ? 34.6 : 33.0
+            _ = try store.saveSleepSummary(SleepStaging.summary(segments),
+                                           night: SleepNightKey.night(inBedStart: start, inBedEnd: end),
+                                           inBedStart: start, inBedEnd: end, sleepOnset: start, sleepWake: end,
+                                           extras: extras, device: .ringConn)
+        }
+        // 21 frozen days before today (the banding floor), then today FLAGGED.
+        for back in 0...21 {
+            try store.insertRiskDayIfAbsent(StoredHeadacheRisk(
+                day: day(back), nightKey: day(back), index: back == 0 ? 90 : 40,
+                bandRaw: back == 0 ? HeadacheSignals.Band.flagged.rawValue : HeadacheSignals.Band.typical.rawValue,
+                ringFeatureCount: 4, coverageFraction: 0.9, contributionsJSON: "{}", absentJSON: "{}",
+                computedAt: day(back).addingTimeInterval(10 * 3600)))
+        }
+
+        let suiteName = "bg-alerts-sf1-\(UUID().uuidString)"
+        let ledger = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { ledger.removePersistentDomain(forName: suiteName) }
+        let center = HealthNotificationCenter(store: HealthNotificationStore(ledger))
+
+        // The premise: with the series, this IS a fever morning.
+        let series = await center.restingHRDailySeries(store: store)
+        XCTAssertEqual(series.last?.day, today)
+        XCTAssertTrue(center.tempFeverCandidates(store: store, restingHRDaily: series).fever)
+
+        let noon = today.addingTimeInterval(12 * 3600)   // inside the 07:00-21:00 delivery window
+        await center.evaluate(store: store, session: nil, now: noon)
+        XCTAssertNil(HealthNotificationStore(ledger).lastFired()[.headacheSigns],
+                     "headache.signs was claimed on a fever morning")
+        XCTAssertTrue(HealthNotificationStore(ledger).lastFired().isEmpty)
     }
 
     // MARK: 3. Measured: old main-actor read vs the new one (printed for the PR, not a benchmark)

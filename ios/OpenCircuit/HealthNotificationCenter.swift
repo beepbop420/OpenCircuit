@@ -233,9 +233,15 @@ struct HealthNotificationCenter {
         // #305: the one ~30-day read of this pass, done FIRST and off the main actor. It used to run
         // lazily on the main actor in the middle of the pass (`suspectedFever`). Doing it before any
         // other read keeps everything below in one synchronous stretch, as before.
-        var restingHRDaily = restingHRDaily
-        if restingHRDaily == nil, feverCheckMayNeedSeries(store: localStore) {
-            restingHRDaily = await restingHRDailySeries(store: localStore)
+        // Below, the fever cross-check gets this series or `[]`. `[]` only when `feverCheckMayNeedSeries`
+        // said no, i.e. no temp offset (or neither branch runs), so `suspectedFever` never reads it.
+        let series: [RestingHR.DailyValue]
+        if let restingHRDaily {
+            series = restingHRDaily
+        } else if feverCheckMayNeedSeries(store: localStore) {
+            series = await restingHRDailySeries(store: localStore)
+        } else {
+            series = []
         }
 
         // The night-level candidates (#85, #183). The instant ones (#73) are decided at the gate, in
@@ -335,7 +341,7 @@ struct HealthNotificationCenter {
         // computed yet (see the #183 branch, which needs it for its own suppression).
         var feverSuspected: Bool?
         if HealthAlertDefaults.tempFeverEnabledValue() {
-            let temp = tempFeverCandidates(store: localStore, restingHRDaily: restingHRDaily)
+            let temp = tempFeverCandidates(store: localStore, restingHRDaily: series)
             feverSuspected = temp.fever
             if let night = temp.night {
                 let key = TempFeverNotifications.dayKey(for: night)
@@ -358,7 +364,7 @@ struct HealthNotificationCenter {
         var headacheSignals: [HeadacheSignals.Feature] = []
         if let ready = headacheCandidate(store: localStore, now: now, lastNotifiedDay: dayLedger,
                                          feverSuspected: feverSuspected,
-                                         restingHRDaily: restingHRDaily) {
+                                         restingHRDaily: series) {
             candidates.append(.headacheSigns)
             headacheDayKey = ready.dayKey
             headacheRowDay = ready.rowDay
@@ -469,7 +475,7 @@ struct HealthNotificationCenter {
     /// off a second 40-night fetch. One owner for "is this a fever morning", so the fever alert and
     /// the suppression it drives can never disagree.
     func tempFeverCandidates(store: LocalStore,
-                                     restingHRDaily: [RestingHR.DailyValue]?)
+                                     restingHRDaily: [RestingHR.DailyValue])
         -> (candidates: [HealthNotification], night: Date?, fever: Bool) {
         guard let temp = skinTempReport(store: store) else {
             // No usable overnight temperature ⇒ no temp offset ⇒ `VitalsBaseline.suspectedFever`
@@ -519,8 +525,9 @@ struct HealthNotificationCenter {
     /// ran past the 10 s scene-update watchdog and the app was killed. The fetch and the derivation
     /// run on a fresh `ModelContext` over the store's container in a detached task, the
     /// `TrendsData.loadAsync` / `DayTimeline.loadAsync` pattern, and only value types come back.
-    /// Every sample write path saves before returning (`ingest`, `insertLiveReadings`,
-    /// `insertWorkoutHeartRateRows`), so the background context reads what the main one would.
+    /// The sample write paths save before returning on their success path (`ingest`,
+    /// `insertLiveReadings`, `insertWorkoutHeartRateRows`), which is the path a catch-up takes, so the
+    /// background context reads what the main one would.
     ///
     /// Same window (`maxBaselineDays + 2` days back from `Date()` — deliberately NOT the caller's
     /// `now`), same `recentSamples(kind: .heartRate,)` fetch and try?-to-empty fallback, same
@@ -533,20 +540,22 @@ struct HealthNotificationCenter {
         // The ownership log is main-actor state: snapshot it here, so the detached read touches
         // nothing main-isolated.
         let log = LocalStore.ownershipLog()
-        let container = store.container
-        return await Task.detached {
-            Self.restingHRDailySeries(container: container, since: since, log: log)
-        }.value
+        return await Self.restingHRDailySeries(container: store.container, since: since, log: log)
     }
 
     /// The off-main read itself. Decision 29: the current device's own readings (exactly
     /// `recentSamples` with an empty log).
+    ///
+    /// `async`, with the detached task INSIDE, on purpose (review of #306): there is no synchronous way
+    /// to run this read, so it can't be called back onto the main actor by mistake.
     nonisolated static func restingHRDailySeries(container: ModelContainer, since: Date,
-                                                 log: DeviceOwnershipLog) -> [RestingHR.DailyValue] {
-        let context = ModelContext(container)
-        let hr = ((try? LocalStore.recentOwnSamples(in: context, kind: .heartRate, since: since, log: log)) ?? [])
-            .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-        return RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).sorted { $0.day < $1.day }
+                                                 log: DeviceOwnershipLog) async -> [RestingHR.DailyValue] {
+        await Task.detached {
+            let context = ModelContext(container)
+            let hr = ((try? LocalStore.recentOwnSamples(in: context, kind: .heartRate, since: since, log: log)) ?? [])
+                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+            return RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).sorted { $0.day < $1.day }
+        }.value
     }
 
     /// Whether this pass's fever cross-check can reach the resting-HR series (#305), so `evaluate` reads
@@ -570,10 +579,10 @@ struct HealthNotificationCenter {
     /// fever flag. Returns false on insufficient history (never a false positive).
     ///
     /// `restingHRDaily` is the series the caller computed on this pass. `evaluate` reads it whenever
-    /// this can be reached with an offset (`feverCheckMayNeedSeries`), so nil here means no offset;
-    /// there is no main-actor fallback scan any more (#305).
-    private func suspectedFever(tempOffsetC: Double?, restingHRDaily: [RestingHR.DailyValue]?) -> Bool {
-        guard let tempOffsetC, let daily = restingHRDaily else { return false }
+    /// this can be reached with an offset (`feverCheckMayNeedSeries`); there is no main-actor fallback
+    /// scan any more (#305).
+    private func suspectedFever(tempOffsetC: Double?, restingHRDaily daily: [RestingHR.DailyValue]) -> Bool {
+        guard let tempOffsetC else { return false }
         guard let today = daily.last?.bpm else { return false }
         let prior = daily.dropLast().map(\.bpm)
         return VitalsBaseline.suspectedFever(restingHRToday: today, restingHRPrior: Array(prior),
@@ -612,7 +621,7 @@ struct HealthNotificationCenter {
     private func headacheCandidate(store: LocalStore, now: Date,
                                    lastNotifiedDay: [HealthNotification: Int],
                                    feverSuspected: Bool?,
-                                   restingHRDaily: [RestingHR.DailyValue]?)
+                                   restingHRDaily: [RestingHR.DailyValue])
         -> (dayKey: Int, rowDay: Date, signals: [HeadacheSignals.Feature])? {
         // A background launch never renders any view, so it cannot rely on the UI having registered
         // defaults — an unregistered read returns a spurious `false` that happens to match today's

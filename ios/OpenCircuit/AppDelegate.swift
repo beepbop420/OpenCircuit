@@ -351,8 +351,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     /// The ring run's post-sync alert passes (#73/#85, #183), for the strap's store: freeze today's
     /// overnight-signals row (opted-in only), then the body-vital alerts from persisted samples.
+    /// Internal, not private, so `BackgroundAlertOffMainTests` can drive this exact pass (#305).
     @MainActor
-    private static func evaluateBodyAlerts(store: LocalStore) async {
+    static func evaluateBodyAlerts(store: LocalStore) async {
         let alerts = HealthNotificationCenter()
         let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
             ? await alerts.restingHRDailySeries(store: store) : nil
