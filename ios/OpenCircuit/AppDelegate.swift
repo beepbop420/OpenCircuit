@@ -260,7 +260,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 let alertStore = LocalStore(container: container)
                 let alerts = HealthNotificationCenter()
                 let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
-                    ? alerts.restingHRDailySeries(store: alertStore) : nil
+                    ? await alerts.restingHRDailySeries(store: alertStore) : nil
                 if let restingHRDaily {
                     await HeadacheEngine().refreshToday(store: alertStore, restingHR: restingHRDaily)
                 }
@@ -355,7 +355,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private static func evaluateBodyAlerts(store: LocalStore) async {
         let alerts = HealthNotificationCenter()
         let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
-            ? alerts.restingHRDailySeries(store: store) : nil
+            ? await alerts.restingHRDailySeries(store: store) : nil
         if let restingHRDaily {
             await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
         }

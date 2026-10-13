@@ -224,11 +224,19 @@ struct HealthNotificationCenter {
     ///
     /// `restingHRDaily` (#183): a resting-HR daily series the CALLER already computed for the
     /// overnight-signals engine on this same pass, handed over so the fever cross-check below reuses
-    /// it instead of repeating the scan (see `restingHRDailySeries`). Leaving it nil — every caller
-    /// that doesn't run the engine — keeps the original lazy fetch, so nothing about the fever
-    /// verdict changes.
+    /// it instead of repeating the scan (see `restingHRDailySeries`). Left nil — every caller that
+    /// doesn't run the engine — the series is read here, off the main actor, only when the fever
+    /// cross-check can reach it (`feverCheckMayNeedSeries`), so nothing about the fever verdict changes.
     func evaluate(store localStore: LocalStore, session: RingSession?, now: Date = Date(),
                   restingHRDaily: [RestingHR.DailyValue]? = nil) async {
+        // #305: the one ~30-day read of this pass, done FIRST and off the main actor. It used to run
+        // lazily on the main actor in the middle of the pass (`suspectedFever`). Doing it before any
+        // other read keeps everything below in one synchronous stretch, as before.
+        var restingHRDaily = restingHRDaily
+        if restingHRDaily == nil, feverCheckMayNeedSeries(store: localStore) {
+            restingHRDaily = await restingHRDailySeries(store: localStore)
+        }
+
         // The night-level candidates (#85, #183). The instant ones (#73) are decided at the gate, in
         // `decideAndClaim`, from the series gathered below.
         var candidates: [HealthNotification] = []
@@ -395,10 +403,11 @@ struct HealthNotificationCenter {
     /// Returns what fires, in gate order, and the hit behind each instant alert. Static and free of
     /// `LocalStore` so `OpenCircuitTests` can drive the real wiring (`HealthNotificationWiringTests`).
     ///
-    /// Everything here is synchronous ON PURPOSE, and the caller must call it before its first
-    /// `await`. On the main actor a second concurrent `evaluate()` (the app-open scene-active probe
-    /// and the sync-complete trigger each start their own Task) then reads both marks and is gated
-    /// out, instead of both passing and double-posting the same alert.
+    /// Everything here is synchronous ON PURPOSE, and the caller must call it with no `await` between
+    /// it and the reads it decides on (`evaluate`'s only earlier `await` is the off-main resting-HR read
+    /// at its very top, #305). On the main actor a second concurrent `evaluate()` (the app-open
+    /// scene-active probe and the sync-complete trigger each start their own Task) then reads both
+    /// marks and is gated out, instead of both passing and double-posting the same alert.
     ///  - `quiet` is read ONCE by the caller and used for both the live rule and the gate. Re-reading
     ///    it here would let a settings change mid-pass produce a rule and a gate that disagree.
     ///  - `markFired` (the 2 h backoff) and `markLiveWatermark` (decision 32's once-only ledger) are
@@ -461,12 +470,26 @@ struct HealthNotificationCenter {
     func tempFeverCandidates(store: LocalStore,
                                      restingHRDaily: [RestingHR.DailyValue]?)
         -> (candidates: [HealthNotification], night: Date?, fever: Bool) {
-        guard let latest = try? store.latestSleepSummary(), latest.skinTempC > 0 else {
+        guard let temp = skinTempReport(store: store) else {
             // No usable overnight temperature ⇒ no temp offset ⇒ `VitalsBaseline.suspectedFever`
             // would return false anyway (it requires one). Reporting `false` here is that same
             // answer, not a substituted value.
             return ([], nil, false)
         }
+        let report = temp.report
+
+        // Fever: resting-HR baseline vs today + the canonical temp offset (#72 owns the logic).
+        let fever = suspectedFever(tempOffsetC: report.offsetC, restingHRDaily: restingHRDaily)
+        let notifs = TempFeverNotifications.notifications(flags: report.flags, feverSuspected: fever)
+        return (notifs, temp.tonightDay, fever)
+    }
+
+    /// The latest night's skin-temp report against its own device's prior nights, or nil when the
+    /// latest night has no usable temperature. One owner for the offset, read by
+    /// `tempFeverCandidates` and by `feverCheckMayNeedSeries`, so the two can't disagree on whether
+    /// the fever cross-check runs.
+    private func skinTempReport(store: LocalStore) -> (tonightDay: Date, report: SkinTempBaseline.NightReport)? {
+        guard let latest = try? store.latestSleepSummary(), latest.skinTempC > 0 else { return nil }
         // Decision 29: only the latest night's own device's nights (none yet on a device's first night,
         // so no baseline and no night-over-night swing: nothing fires). Every night with an empty log.
         let nights = LocalStore.sameDevice((try? store.recentSleepSummaries(limit: 40)) ?? [], as: latest)
@@ -477,25 +500,26 @@ struct HealthNotificationCenter {
             .filter { cal.startOfDay(for: $0.night) != tonightDay }
             .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
         let previousNight = prior.max { $0.night < $1.night }?.celsius
-        let report = SkinTempBaseline.report(tonight: latest.skinTempC, priorNights: prior,
-                                             previousNight: previousNight)
-
-        // Fever: resting-HR baseline vs today + the canonical temp offset (#72 owns the logic).
-        let fever = suspectedFever(store: store, tempOffsetC: report.offsetC,
-                                   restingHRDaily: restingHRDaily)
-        let notifs = TempFeverNotifications.notifications(flags: report.flags, feverSuspected: fever)
-        return (notifs, tonightDay, fever)
+        return (tonightDay, SkinTempBaseline.report(tonight: latest.skinTempC, priorNights: prior,
+                                                    previousNight: previousNight))
     }
 
     /// The ~30-day resting-HR daily series, ascending by day. Lifted verbatim out of
     /// `suspectedFever` (#72) so it can be computed ONCE per evaluate pass and read by two
     /// consumers — the fever cross-check below and the overnight-signals engine (#183).
     ///
-    /// Not `private`: the three background delivery paths that run the engine
-    /// (`RingSession.deliverBackgroundResults`, the BGTask handler, the Sleep Focus-off runner)
-    /// compute it here and hand the SAME array to both, because this fetch is the expensive part of
-    /// a pass — `StoredSample` has no index on `start`, so a ~30-day scan runs on the main actor
-    /// several times an hour and paying for it twice is not affordable on a bounded background wake.
+    /// Not `private`: the background delivery paths that run the engine
+    /// (`RingSession.deliverBackgroundResults`, the BGTask handlers, the Sleep Focus-off runners, the
+    /// strap's catch-up) compute it here and hand the SAME array to both, because this fetch is the
+    /// expensive part of a pass — `StoredSample` has no index on `start`, and a strap logging HR once
+    /// a minute puts ~46 k rows in the window.
+    ///
+    /// OFF THE MAIN ACTOR (#305). Materialising those rows on the main actor during a background wake
+    /// ran past the 10 s scene-update watchdog and the app was killed. The fetch and the derivation
+    /// run on a fresh `ModelContext` over the store's container in a detached task, the
+    /// `TrendsData.loadAsync` / `DayTimeline.loadAsync` pattern, and only value types come back.
+    /// Every sample write path saves before returning (`ingest`, `insertLiveReadings`,
+    /// `insertWorkoutHeartRateRows`), so the background context reads what the main one would.
     ///
     /// Same window (`maxBaselineDays + 2` days back from `Date()` — deliberately NOT the caller's
     /// `now`), same `recentSamples(kind: .heartRate,)` fetch and try?-to-empty fallback, same
@@ -503,24 +527,52 @@ struct HealthNotificationCenter {
     /// day below `RestingHR.dayCoverage` has no value, so the fever cross-check and the overnight
     /// signals skip a thin day (as one with no readings) instead of comparing it — the same series
     /// Vitals Status judges.
-    func restingHRDailySeries(store: LocalStore) -> [RestingHR.DailyValue] {
+    func restingHRDailySeries(store: LocalStore) async -> [RestingHR.DailyValue] {
         let since = Date().addingTimeInterval(-Double(VitalsBaseline.Config().maxBaselineDays + 2) * 86_400)
-        // Decision 29: the current device's own readings (exactly `recentSamples` with an empty log).
-        let hr = ((try? store.recentOwnSamples(kind: .heartRate, since: since)) ?? [])
+        // The ownership log is main-actor state: snapshot it here, so the detached read touches
+        // nothing main-isolated.
+        let log = LocalStore.ownershipLog()
+        let container = store.container
+        return await Task.detached {
+            Self.restingHRDailySeries(container: container, since: since, log: log)
+        }.value
+    }
+
+    /// The off-main read itself. Decision 29: the current device's own readings (exactly
+    /// `recentSamples` with an empty log).
+    nonisolated static func restingHRDailySeries(container: ModelContainer, since: Date,
+                                                 log: DeviceOwnershipLog) -> [RestingHR.DailyValue] {
+        let context = ModelContext(container)
+        let hr = ((try? LocalStore.recentOwnSamples(in: context, kind: .heartRate, since: since, log: log)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         return RestingHR.dailyValues(hr: hr, daytimeCoverage: RestingHR.dayCoverage).sorted { $0.day < $1.day }
+    }
+
+    /// Whether this pass's fever cross-check can reach the resting-HR series (#305), so `evaluate` reads
+    /// it off the main actor BEFORE its synchronous part instead of on the main actor in the middle.
+    ///
+    /// A SUPERSET of the lazy condition it replaces: `suspectedFever` reads the series only when a temp
+    /// offset exists, and only from `tempFeverCandidates`, which runs when the temp/fever alerts are on
+    /// or when the #183 branch needs a fever verdict (Headache on and not retired). The same
+    /// `skinTempReport` decides the offset in both places, and with no `await` between a `false` here
+    /// and the reads after it, a pass that is told "no" can never reach `suspectedFever` with an offset.
+    private func feverCheckMayNeedSeries(store: LocalStore) -> Bool {
+        HeadacheDefaults.register()
+        let defaults = UserDefaults.standard
+        let headache = defaults.bool(forKey: HeadacheDefaults.enabled)
+            && !defaults.bool(forKey: Self.headacheRetiredKey)
+        guard HealthAlertDefaults.tempFeverEnabledValue() || headache else { return false }
+        return skinTempReport(store: store)?.report.offsetC != nil
     }
 
     /// Resting-HR daily series → personal baseline, cross-referenced with the temp offset for the
     /// fever flag. Returns false on insufficient history (never a false positive).
     ///
-    /// `restingHRDaily` is the series the caller already computed on this pass, or nil. Nil keeps the
-    /// original LAZY behaviour exactly: the fetch happens only after the `tempOffsetC` guard passes,
-    /// so a pass that never reaches a temp offset still costs no scan.
-    private func suspectedFever(store: LocalStore, tempOffsetC: Double?,
-                                restingHRDaily: [RestingHR.DailyValue]?) -> Bool {
-        guard let tempOffsetC else { return false }
-        let daily = restingHRDaily ?? restingHRDailySeries(store: store)
+    /// `restingHRDaily` is the series the caller computed on this pass. `evaluate` reads it whenever
+    /// this can be reached with an offset (`feverCheckMayNeedSeries`), so nil here means no offset;
+    /// there is no main-actor fallback scan any more (#305).
+    private func suspectedFever(tempOffsetC: Double?, restingHRDaily: [RestingHR.DailyValue]?) -> Bool {
+        guard let tempOffsetC, let daily = restingHRDaily else { return false }
         guard let today = daily.last?.bpm else { return false }
         let prior = daily.dropLast().map(\.bpm)
         return VitalsBaseline.suspectedFever(restingHRToday: today, restingHRPrior: Array(prior),
