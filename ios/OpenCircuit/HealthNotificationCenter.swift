@@ -1,5 +1,6 @@
 import Foundation
 import OpenCircuitKit
+import SwiftData
 import UserNotifications
 import UIKit
 

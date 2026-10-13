@@ -144,14 +144,14 @@ final class RestingHRThinDayTests: XCTestCase {
         return LocalStore(container.mainContext)
     }
 
-    func testTheNotificationSeriesSkipsAThinDay() throws {
+    func testTheNotificationSeriesSkipsAThinDay() async throws {
         // The series reads back ~32 days from the real clock, so the days sit in the recent past.
         let cal = Calendar.current
         let thin = cal.date(byAdding: .day, value: -1, to: cal.startOfDay(for: Date()))!
         let store = try makeStore()
         _ = try store.ingest(quantity(history(fullDays: 8, last: thin, calendar: cal)))
 
-        let series = HealthNotificationCenter().restingHRDailySeries(store: store)
+        let series = await HealthNotificationCenter().restingHRDailySeries(store: store)
         XCTAssertEqual(series.count, 8)
         XCTAssertEqual(series.last?.day, cal.date(byAdding: .day, value: -1, to: thin))
         XCTAssertEqual(series.last?.bpm, 58)
