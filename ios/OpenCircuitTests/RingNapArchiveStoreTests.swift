@@ -342,8 +342,9 @@ final class RingNapArchiveStoreTests: XCTestCase {
         XCTAssertEqual(try rows(store).count, 1, "a strap nap is not the ring's time to store")
     }
 
-    /// A strap nap never replaces a ring nap's row, and a strap nap that grows after its write is
-    /// rewritten too (the one strap change decision 69 makes).
+    /// A strap nap never replaces a ring nap's row, and its rewrite never cleans over one; a strap nap
+    /// that grows after its write, clear of other naps, is rewritten too (the one strap change
+    /// decision 69 makes).
     func testAStrapNapReplacesOnlyStrapRows() async throws {
         let switchAt = hour(14.5)
         ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchAt)]))
@@ -351,10 +352,15 @@ final class RingNapArchiveStoreTests: XCTestCase {
         try save(store, 13.5, 14.6)                        // the ring's, midpoint before the switch
         try save(store, 14.55, 15.5, family: .zeppOS)      // overlaps it; the strap's
         XCTAssertEqual(try rows(store).count, 2, "the ring row is not the strap's to replace")
-
+        try save(store, 17, 17.5, family: .zeppOS)
         try await flush(store)
+
         try save(store, 14.55, 16, family: .zeppOS)
-        XCTAssertEqual(try rows(store).count, 2)
-        XCTAssertEqual(try store.pendingNaps().map(\.start), [hour(14.55)], "the grown strap nap is rewritten")
+        XCTAssertEqual(try rows(store).count, 3)
+        XCTAssertEqual(try store.pendingNaps().count, 0, "its clean would reach the ring's nap: left as written")
+
+        try save(store, 17, 18.2, family: .zeppOS)
+        XCTAssertEqual(try rows(store).count, 3)
+        XCTAssertEqual(try store.pendingNaps().map(\.start), [hour(17)], "the grown strap nap is rewritten")
     }
 }

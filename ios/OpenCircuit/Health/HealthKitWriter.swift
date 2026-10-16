@@ -819,7 +819,8 @@ final class HealthKitWriter {
     }
 
     /// Delete this app's sleep samples across a nap's previously-mirrored span, EXCLUDING the
-    /// samples just written and anything inside the nap's current window. Own-samples-only, so a
+    /// samples just written and anything inside `current` (an edited nap's window; empty for a
+    /// re-detected one, see `mirrorNap`). Own-samples-only, so a
     /// night's sleep or another app's data is never touched. Best-effort: a failure leaves a
     /// transient duplicate the next edit cleans up, which is strictly better than deleting
     /// optimistically and losing the record.

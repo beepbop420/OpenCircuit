@@ -3277,10 +3277,11 @@ struct LocalStore {
         let mirrored = group.compactMap(Self.napMirroredSpan)
         let lo = ([start] + mirrored.map(\.start)).min() ?? start
         let hi = ([end] + mirrored.map(\.end)).max() ?? end
-        // The flush's clean runs over everything any of these rows wrote; it must never reach a nap
-        // the user added or edited. There, keep the old in-place upsert and leave Health as it is.
+        // The flush's clean deletes this app's sleep samples across everything these rows wrote, so
+        // it must never reach another nap: one the user added or edited, or the other device's.
+        // There, keep the old in-place upsert and leave Health as it is.
         if !replaced.isEmpty || !mirrored.isEmpty,
-           manualNapOverlaps(lo, hi) {
+           otherNapReaches(lo, hi, except: group) {
             try saveNapInPlace(exact, start: start, end: end, asleepMin: asleepMin,
                                isLongNap: isLongNap, segments: segments)
             return
@@ -3325,11 +3326,18 @@ struct LocalStore {
         return DateInterval(start: row.start, end: row.end)
     }
 
-    /// Whether a nap the user added or edited overlaps `[start, end)`.
-    private func manualNapOverlaps(_ start: Date, _ end: Date) -> Bool {
+    /// Whether a nap row outside `group` (its window, or what it wrote) touches `[start, end]`.
+    /// Touching counts: the clean's HealthKit predicate is not strict at its edges.
+    private func otherNapReaches(_ start: Date, _ end: Date, except group: [StoredNap]) -> Bool {
+        let lo = start.addingTimeInterval(-86_400), hi = end.addingTimeInterval(86_400)
         let rows = (try? context.fetch(FetchDescriptor<StoredNap>(
-            predicate: #Predicate { $0.isManuallyAdded || $0.isManuallyEdited }))) ?? []
-        return rows.contains { start < $0.effectiveEnd && end > $0.effectiveStart }
+            predicate: #Predicate { $0.start > lo && $0.start < hi }))) ?? []
+        return rows.contains { row in
+            guard !group.contains(where: { $0 === row }) else { return false }
+            let spans = [DateInterval(start: min(row.start, row.effectiveStart), end: max(row.end, row.effectiveEnd))]
+                + [Self.napMirroredSpan(row)].compactMap { $0 }
+            return spans.contains { start <= $0.end && end >= $0.start }
+        }
     }
 
     /// The upsert `saveNap` did before decision 69c: keyed by exact start, `healthWritten` kept.
