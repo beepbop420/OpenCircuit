@@ -1154,6 +1154,18 @@ public enum BulkSleep {
         return ActivityPeriod.mainSleepBlock(periods)
     }
 
+    /// Every clustered sleep span in `records` (`ActivityPeriod.sleepClusters`), from the same
+    /// detection `mainSleep` runs. `mainSleep` is the longest of these when it passes the night floor.
+    public static func sleepClusters(from records: [BulkRecord],
+                                     temperatures: [TemperatureSample] = [],
+                                     epoch: Int = Command.syncEpoch) -> [ActivityPeriod] {
+        let periods = ActivityPeriod.detectFromMotion(motionTimeline(from: records, epoch: epoch),
+                                                      temperatureSamples: temperatures,
+                                                      heartRateSamples: heartRateTimeline(from: records, epoch: epoch),
+                                                      sleepVitalTimes: sleepVitalTimeline(from: records, epoch: epoch))
+        return ActivityPeriod.sleepClusters(periods)
+    }
+
     /// HealthKit sleep segments for the detected night: an `inBed` span plus
     /// `asleepCore`/`awake` sub-segments from the stillness detection. Finer
     /// Light/Deep/REM staging needs an HR-based model (TODO) — the ring doesn't
