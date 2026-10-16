@@ -94,7 +94,7 @@ public enum NapDetection {
 
     /// The records the ring's nap pass judges, and whether their oldest record is where retention
     /// cut the archive.
-    public struct RingNapInput: Equatable, Sendable {
+    public struct RingNapInput: Equatable {
         public let records: [BulkRecord]
         /// Retention pruned records within `ActivityPeriod.maxSleepPause` of the oldest one kept, and
         /// this pass did not drain that stretch itself. Sleep there may be the rest of a cluster

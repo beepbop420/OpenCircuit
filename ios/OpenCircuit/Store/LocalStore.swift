@@ -3239,27 +3239,103 @@ struct LocalStore {
 
     // MARK: Naps (#76) — separate from the night so they never double-count
 
-    /// Upsert one auto-detected nap, keyed by start. A re-detected nap with the same start
-    /// updates in place; a genuinely new nap inserts. Preserves `healthWritten` on update so a
-    /// nap already mirrored to Health isn't re-written.
+    /// Upsert one auto-detected nap. ONE stored row per nap (decision 69c): a re-detection with the
+    /// same start updates that row, and one overlapping AUTO rows of the same device at a different
+    /// start replaces them (the surviving row moves to the new start; the others go). A row the user
+    /// added or edited is never touched.
+    ///
+    /// When the window moves after a Health write (an edge by `napRewriteTolerance` or more, or rows
+    /// merged), the row is re-armed with the union of what was written as its written span, so
+    /// `flushNaps` writes the new window first and then cleans the old one (`staleNapHealthSpan`).
+    /// A smaller move stays as written: re-detection over a growing archive jitters an edge by a few
+    /// samples, and a rewrite for that would churn Health on every drain.
     ///
     /// `family` is the device that detected it: the ring (`RingSession.persistNaps`), or the Helio
     /// Strap (`saveHelioNap`, #231). The row has no device column (no schema change): the ownership
-    /// log says whose it is, so a nap is stored only in time its own device owned.
+    /// log says whose it is, so a nap is stored only in time its own device owned, and replaces only
+    /// that device's rows.
     func saveNap(start: Date, end: Date, asleepMin: Int, isLongNap: Bool,
                  segments: [SleepSegment] = [], family: DeviceOwnershipLog.Family = .ringConn) throws {
         // Persistence-layer backstop mirroring the manual path's: a nap overlapping a STORED night
-        // is that night's sleep counted twice. `NapDetection` only excludes the slice-local
-        // `mainSleep`, so a partial drain slice holding just a post-arousal morning bout (too short
-        // to be a night on its own) would otherwise re-save a "nap" the archive-union staging
-        // absorbs into the night (🟢 2026-08-16 device case; review find).
+        // is that night's sleep counted twice. `NapDetection` excludes only overnight sleep blocks
+        // it can see, so a morning bout the archive-union staging absorbed into the night (🟢
+        // 2026-08-16 device case; review find) is kept out here.
         if overlapsStoredNight(start, end) { return }
         // Decision 28: a nap in time the other device owned is not this device's to store.
-        if Self.ownershipLog().owner(at: DeviceOwnershipLog.midpoint(start, end)) != family { return }
-        let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
-        if let existing = try? context.fetch(descriptor).first {
-            // A manually edited/added nap is authoritative — auto re-detection must not overwrite it.
-            if existing.isManuallyEdited || existing.isManuallyAdded { return }
+        let log = Self.ownershipLog()
+        if log.owner(at: DeviceOwnershipLog.midpoint(start, end)) != family { return }
+        let overlapping = (try? context.fetch(FetchDescriptor<StoredNap>(
+            predicate: #Predicate { $0.start < end && $0.end > start }))) ?? []
+        let exact = overlapping.first { $0.start == start }
+        // A manually edited/added nap is authoritative — auto re-detection must not overwrite it.
+        if let exact, exact.isManuallyEdited || exact.isManuallyAdded { return }
+        let replaced = overlapping.filter {
+            $0.start != start && !$0.isManuallyEdited && !$0.isManuallyAdded
+                && log.owner(at: DeviceOwnershipLog.midpoint($0.start, $0.end)) == family
+        }
+        let group = [exact].compactMap { $0 } + replaced
+        let mirrored = group.compactMap(Self.napMirroredSpan)
+        let lo = ([start] + mirrored.map(\.start)).min() ?? start
+        let hi = ([end] + mirrored.map(\.end)).max() ?? end
+        // The flush's clean runs over everything any of these rows wrote; it must never reach a nap
+        // the user added or edited. There, keep the old in-place upsert and leave Health as it is.
+        if !replaced.isEmpty || !mirrored.isEmpty,
+           manualNapOverlaps(lo, hi) {
+            try saveNapInPlace(exact, start: start, end: end, asleepMin: asleepMin,
+                               isLongNap: isLongNap, segments: segments)
+            return
+        }
+
+        let row: StoredNap
+        if let survivor = exact ?? replaced.first {
+            row = survivor
+            row.start = start
+        } else {
+            row = StoredNap(start: start, end: end, asleepMin: asleepMin, isLongNap: isLongNap)
+            context.insert(row)
+        }
+        row.end = end
+        row.asleepMin = asleepMin
+        row.isLongNap = isLongNap
+        row.stagedSegments = segments.isEmpty ? nil : segments
+        row.updatedAt = Date()
+        if let written = mirrored.first {
+            row.healthWrittenStart = mirrored.map(\.start).min() ?? written.start
+            row.healthWrittenEnd = mirrored.map(\.end).max() ?? written.end
+            let unmoved = group.count == 1 && group[0].healthWritten
+                && abs(row.healthWrittenStart.timeIntervalSince(start)) < Self.napRewriteTolerance
+                && abs(row.healthWrittenEnd.timeIntervalSince(end)) < Self.napRewriteTolerance
+            row.healthWritten = unmoved
+        }
+        for other in group where other !== row { context.delete(other) }
+        try context.save()
+    }
+
+    /// How far a re-detected nap's edge may sit from what Health holds before the nap is rewritten:
+    /// one ring epoch (`BulkRecord.epochSeconds`, 150 s).
+    static let napRewriteTolerance = TimeInterval(BulkRecord.epochSeconds)
+
+    /// The span a nap row's samples cover in Apple Health, or nil when it has none: the recorded
+    /// written span, else (a row written before spans were recorded) its own window.
+    private static func napMirroredSpan(_ row: StoredNap) -> DateInterval? {
+        if row.healthWrittenEnd > row.healthWrittenStart {
+            return DateInterval(start: row.healthWrittenStart, end: row.healthWrittenEnd)
+        }
+        guard row.healthWritten, row.end > row.start else { return nil }
+        return DateInterval(start: row.start, end: row.end)
+    }
+
+    /// Whether a nap the user added or edited overlaps `[start, end)`.
+    private func manualNapOverlaps(_ start: Date, _ end: Date) -> Bool {
+        let rows = (try? context.fetch(FetchDescriptor<StoredNap>(
+            predicate: #Predicate { $0.isManuallyAdded || $0.isManuallyEdited }))) ?? []
+        return rows.contains { start < $0.effectiveEnd && end > $0.effectiveStart }
+    }
+
+    /// The upsert `saveNap` did before decision 69c: keyed by exact start, `healthWritten` kept.
+    private func saveNapInPlace(_ existing: StoredNap?, start: Date, end: Date, asleepMin: Int,
+                                isLongNap: Bool, segments: [SleepSegment]) throws {
+        if let existing {
             existing.end = end
             existing.asleepMin = asleepMin
             existing.isLongNap = isLongNap
