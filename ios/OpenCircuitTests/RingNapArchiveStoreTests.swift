@@ -114,7 +114,7 @@ final class RingNapArchiveStoreTests: XCTestCase {
     /// 6 epochs. Each pass judges the archive, so it is recorded once, and whole.
     func testANapDeliveredAsAnOrphanBatchAndSmallDrainsIsRecordedOnceAndWhole() throws {
         let store = try makeStore()
-        let all = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 30)])
+        let all = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 70)])
         var pieces: [[BulkRecord]] = [Array(all[0..<17])]
         var i = 17
         for size in [5, 1, 6, 1, 4, 5, 2] { pieces.append(Array(all[i..<(i + size)])); i += size }
@@ -288,7 +288,7 @@ final class RingNapArchiveStoreTests: XCTestCase {
     func testManualAndEditedNapsKeepPrecedence() async throws {
         let store = try makeStore()
         XCTAssertTrue(try store.addManualNap(start: hour(13), end: hour(14)))
-        let archive = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 30)])
+        let archive = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 70)])
         RingSession.persistNaps(archive: archive, drained: archive, temperatures: [], store: store)
         XCTAssertEqual(try rows(store).map(\.isManuallyAdded), [true], "the detected nap overlapping it is skipped")
         assertWindow(try rows(store).first, 13, 14)

@@ -61,7 +61,7 @@ final class RingNapArchiveTests: XCTestCase {
     /// itself; every length is one nap now.
     func testANapIsDetectedWhenItsMainSleepComesFromTheSameDaytimeSlice() {
         for minutes in [30, 75, 90, 120] {
-            let (records, epoch) = timeline(from: 13, [(.awake, 30), (.asleep, minutes), (.awake, 30)])
+            let (records, epoch) = timeline(from: 13, [(.awake, 30), (.asleep, minutes), (.awake, 70)])
             let input = NapDetection.ringNapInput(archive: records, drained: records)
             let naps = NapDetection.ringNaps(from: input, epoch: epoch)
             XCTAssertEqual(naps.count, 1, "\(minutes) min nap")
@@ -74,7 +74,7 @@ final class RingNapArchiveTests: XCTestCase {
     /// A nap reaching the phone as an adopted orphan batch and then 1 to 6 epoch drains is judged
     /// whole on the pass that first holds all of it, whatever each drain held.
     func testANapSplitAcrossAnOrphanBatchAndSmallDrainsIsJudgedWholeOverTheArchive() {
-        let (all, epoch) = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 30)])
+        let (all, epoch) = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 70)])
         let whole = NapDetection.naps(from: all, mainSleep: nil, epoch: epoch)
         XCTAssertEqual(whole.count, 1)
 
@@ -128,6 +128,53 @@ final class RingNapArchiveTests: XCTestCase {
         let input = NapDetection.ringNapInput(archive: records, drained: Array(records.suffix(24)))
         let naps = NapDetection.ringNaps(from: input, epoch: epoch)
         assertStarts(naps, [14])
+    }
+
+    // MARK: 69d, the open tail
+
+    /// The archive as a pass at `hour` sees it: every record up to that wall-clock time.
+    private func pass(_ records: [BulkRecord], epoch: Int, at h: Double) -> NapDetection.RingNapInput {
+        let upTo = records.filter { $0.date(epoch: epoch) <= hour(h) }
+        return NapDetection.ringNapInput(archive: upTo, drained: Array(upTo.suffix(24)))
+    }
+
+    /// An evening sleep from 19:00 keeps a daytime midpoint until it passes 21:00. Seen by hourly
+    /// passes it is never a nap: open while it grows, overnight once it closes.
+    func testAnEveningSleepInProgressIsNeverANap() {
+        let (records, epoch) = timeline(from: 13, [(.awake, 360), (.asleep, 690), (.awake, 300)])
+        for h in stride(from: 19 + 57 / 60.0, through: 35, by: 1) {
+            XCTAssertEqual(NapDetection.ringNaps(from: pass(records, epoch: epoch, at: h), epoch: epoch), [],
+                           "pass at \(h) h")
+        }
+        let unguarded = NapDetection.naps(from: records.filter { $0.date(epoch: epoch) <= hour(21 + 57 / 60.0) },
+                                          excluding: [], epoch: epoch)
+        XCTAssertEqual(unguarded.count, 1, "unguarded, the 22:00 pass sees a ~3 h daytime-midpoint 'nap'")
+    }
+
+    /// A daytime nap still in progress is judged only once an hour of non-sleep records follows it.
+    func testANapInProgressIsJudgedOnlyAfterAnHourOfNonSleepRecords() {
+        // 13:00 → 14:10 asleep, then awake until 16:30.
+        let (records, epoch) = timeline(from: 12, [(.awake, 60), (.asleep, 70), (.awake, 140)])
+        for h in stride(from: 13.5, through: 15.1, by: 1 / 6.0) {
+            XCTAssertEqual(NapDetection.ringNaps(from: pass(records, epoch: epoch, at: h), epoch: epoch), [],
+                           "pass at \(h) h: still open")
+        }
+        for h in stride(from: 15 + 15 / 60.0, through: 16.5, by: 1 / 6.0) {
+            assertStarts(NapDetection.ringNaps(from: pass(records, epoch: epoch, at: h), epoch: epoch), [13],
+                         "pass at \(h) h: closed")
+        }
+    }
+
+    /// A sleep cluster ending exactly at the archive's newest record is open. One followed by an
+    /// hour of records is judged, however long ago those records were drained.
+    func testAClusterEndingAtTheArchivesEndIsNotJudged() {
+        let (open, openEpoch) = timeline(from: 12, [(.awake, 60), (.asleep, 70)])
+        XCTAssertEqual(NapDetection.ringNaps(from: NapDetection.ringNapInput(archive: open, drained: open),
+                                             epoch: openEpoch), [])
+        let (closed, closedEpoch) = timeline(from: 12, [(.awake, 60), (.asleep, 70), (.awake, 65)])
+        assertStarts(NapDetection.ringNaps(from: NapDetection.ringNapInput(archive: closed, drained: []),
+                                           epoch: closedEpoch), [13],
+                     "the archive extends past the nap; no newer drain is needed")
     }
 
     // MARK: The archive's head

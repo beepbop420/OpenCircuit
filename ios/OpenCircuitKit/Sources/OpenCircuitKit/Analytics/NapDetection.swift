@@ -135,6 +135,15 @@ public enum NapDetection {
     /// At a retention cut, nothing within `maxSleepPause` of the head (or in a cluster starting
     /// there) is judged: it may be a night's tail whose start is gone. Each such nap was judged
     /// whole on the earlier passes, while it sat further from the head.
+    ///
+    /// 69d, the tail twin: a sleep cluster whose end is within `maxSleepPause` of the newest record
+    /// (any layout, worn or not) is still open and is not judged on this pass. It is judged on a
+    /// later pass once the records extend past it, or never if it becomes overnight. Without this an
+    /// evening sleep in progress kept a daytime midpoint until it passed 21:00 and was stored, and
+    /// written to Health, as a nap of up to about 3 h; and a daytime nap in progress was rewritten on
+    /// every pass. The cost: a nap is stored about an hour after it ends. A candidate ending inside
+    /// that last hour is left for later the same way, whichever detector saw it. An archive whose
+    /// newest record is old (no drain for hours) did extend past its naps, so they are judged.
     public static func ringNaps(from input: RingNapInput,
                                 temperatures: [TemperatureSample] = [],
                                 epoch: Int = Command.syncEpoch) -> [Nap] {
@@ -149,6 +158,13 @@ public enum NapDetection {
             let reach = head.addingTimeInterval(ActivityPeriod.maxSleepPause)
             let end = clusters.filter { $0.start < reach }.map(\.end).max() ?? reach
             excluded.append(ActivityPeriod(activity: .sleep, start: head, end: max(end, reach)))
+        }
+        if let last = input.records.last {
+            let newest = last.date(epoch: epoch)
+            let openFrom = newest.addingTimeInterval(-ActivityPeriod.maxSleepPause)
+            let start = clusters.filter { $0.end > openFrom }.map(\.start).min() ?? openFrom
+            excluded.append(ActivityPeriod(activity: .sleep, start: min(start, openFrom),
+                                           end: newest.addingTimeInterval(TimeInterval(BulkRecord.epochSeconds))))
         }
         return naps(from: input.records, excluding: excluded, temperatures: temperatures, epoch: epoch)
     }
