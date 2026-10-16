@@ -99,6 +99,54 @@ final class RingNapArchiveStoreTests: XCTestCase {
         return effects
     }
 
+    /// This app's sleep samples in a stand-in Health store. The clean is applied the way
+    /// `deleteStaleNapSleep` asks HealthKit to: every sample overlapping the stale span, edges
+    /// touching included (the conservative reading), except the kept UUIDs and anything wholly
+    /// inside a non-empty spared window.
+    private final class FakeSleepHealth {
+        struct Sample: Equatable { let id: String; let interval: DateInterval }
+        var samples: [Sample] = []
+        var writes = 0
+        func add(_ id: String, _ interval: DateInterval) { samples.append(Sample(id: id, interval: interval)) }
+        func write(_ segments: [SleepSegment]) -> [String] {
+            writes += 1
+            return segments.enumerated().map { i, seg in
+                let id = "w\(writes)-\(i)"
+                add(id, DateInterval(start: seg.start, end: seg.end))
+                return id
+            }
+        }
+        func clean(_ stale: DateInterval, kept: [String], spared: Range<Date>) {
+            samples.removeAll { s in
+                guard s.interval.start <= stale.end, s.interval.end >= stale.start, !kept.contains(s.id) else { return false }
+                if spared.upperBound > spared.lowerBound,
+                   s.interval.start >= spared.lowerBound, s.interval.end <= spared.upperBound { return false }
+                return true
+            }
+        }
+        func has(_ id: String) -> Bool { samples.contains { $0.id == id } }
+    }
+
+    /// `flush`, against a `FakeSleepHealth`.
+    private func flush(_ store: LocalStore, into health: FakeSleepHealth) async throws {
+        for nap in try store.pendingNaps() {
+            let segments = [SleepSegment(start: nap.effectiveStart, end: nap.effectiveEnd, stage: .inBed)]
+            try await HealthKitWriter.mirrorNap(nap, segments: segments, store: store,
+                                                write: { segs, _ in health.write(segs) },
+                                                deleteStale: { health.clean($0, kept: $1, spared: $2) })
+        }
+    }
+
+    private func saveNight(_ store: LocalStore, from: Double, to: Double) throws {
+        let night = [SleepSegment(start: hour(from), end: hour(to), stage: .asleepCore)]
+        var extras = LocalStore.SleepNightExtras()
+        extras.hypnogram = night
+        _ = try store.saveSleepSummary(SleepStaging.summary(night),
+                                       night: SleepNightKey.night(inBedStart: hour(from), inBedEnd: hour(to)),
+                                       inBedStart: hour(from), inBedEnd: hour(to),
+                                       sleepOnset: hour(from), sleepWake: hour(to), extras: extras)
+    }
+
     private func span(_ from: Double, _ to: Double) -> DateInterval { DateInterval(start: hour(from), end: hour(to)) }
 
     private func assertWindow(_ row: StoredNap?, _ from: Double, _ to: Double, _ message: String = "",
@@ -279,6 +327,100 @@ final class RingNapArchiveStoreTests: XCTestCase {
 
         try store.saveNap(start: hour(13), end: hour(14).addingTimeInterval(150), asleepMin: 62, isLongNap: false)
         XCTAssertEqual(try store.pendingNaps().count, 1, "one epoch rewrites")
+    }
+
+    // MARK: 69d — the open tail, through the store
+
+    /// An evening sleep from 19:00, seen by hourly passes with a flush after each, never becomes a
+    /// nap row and never reaches Health as one.
+    func testAnEveningSleepInProgressIsNeverStoredAsANap() async throws {
+        let store = try makeStore()
+        let health = FakeSleepHealth()
+        let all = timeline(from: 13, [(.awake, 360), (.asleep, 690), (.awake, 300)])
+        var archive: [BulkRecord] = []
+        for h in stride(from: 19 + 57 / 60.0, through: 35, by: 1) {
+            let piece = all.filter { $0.date() <= hour(h) && $0.date() > hour(h - 1) }
+            archive = EpochArchive.merge(existing: archive, incoming: piece)
+            RingSession.persistNaps(archive: archive, drained: piece, temperatures: [], store: store)
+            try await flush(store, into: health)
+            XCTAssertEqual(try rows(store).count, 0, "pass at \(h) h")
+        }
+        XCTAssertEqual(health.writes, 0)
+    }
+
+    /// A daytime nap seen by passes every 20 min while it runs: no row until an hour of non-sleep
+    /// records follows it, then one row, written to Health once.
+    func testANapInProgressIsStoredOnceClosedAndWrittenOnce() async throws {
+        let store = try makeStore()
+        let health = FakeSleepHealth()
+        let all = timeline(from: 12, [(.awake, 60), (.asleep, 70), (.awake, 140)])
+        var archive: [BulkRecord] = []
+        for h in stride(from: 13 + 20 / 60.0, through: 16.5, by: 1 / 3.0) {
+            let piece = all.filter { $0.date() <= hour(h) && $0.date() > hour(h - 1 / 3.0) }
+            archive = EpochArchive.merge(existing: archive, incoming: piece)
+            RingSession.persistNaps(archive: archive, drained: piece, temperatures: [], store: store)
+            try await flush(store, into: health)
+            if h < 15 + 10 / 60.0 { XCTAssertEqual(try rows(store).count, 0, "pass at \(h) h: still open") }
+        }
+        XCTAssertEqual(try rows(store).count, 1)
+        assertWindow(try rows(store).first, 13, 14 + 10 / 60.0)
+        XCTAssertEqual(health.writes, 1, "written once, after it closed")
+    }
+
+    // MARK: The clean never reaches a stored night
+
+    /// A nap written, re-detected (moved, re-armed), and then a night saved whose window ends inside
+    /// the nap's OLD written span. The rewrite's clean must not delete the night's samples.
+    func testARewriteAfterANightIsSavedNeverDeletesTheNightsSamples() async throws {
+        let store = try makeStore()
+        let health = FakeSleepHealth()
+        try save(store, 8.5, 10)
+        try await flush(store, into: health)
+        let oldNap = try XCTUnwrap(health.samples.first?.id)
+
+        try save(store, 9, 10.1)
+        XCTAssertEqual(try store.pendingNaps().count, 1, "moved: re-armed")
+        try saveNight(store, from: -1, to: 8.75)
+        XCTAssertEqual(try rows(store).count, 1, "the moved nap survives the night's prune")
+        health.add("night-inbed", span(-1, 8.75))
+        health.add("night-last-stage", span(8, 8.75))
+
+        try await flush(store, into: health)
+        XCTAssertTrue(health.has("night-inbed"))
+        XCTAssertTrue(health.has("night-last-stage"))
+        XCTAssertFalse(health.has(oldNap), "the old nap write reaching outside the night is cleaned")
+        XCTAssertEqual(health.samples.filter { $0.id.hasPrefix("w") }.map(\.interval), [span(9, 10.1)])
+    }
+
+    /// A re-detection whose clean would touch a stored night is not rewritten: Health keeps what it has.
+    func testARedetectionWhoseCleanWouldTouchAStoredNightIsNotRewritten() async throws {
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 8 + 20 / 60.0)
+        try save(store, 8.5, 10)
+        try await flush(store)
+        try save(store, 8 + 20 / 60.0, 10)
+        XCTAssertEqual(try rows(store).count, 1)
+        XCTAssertEqual(try store.pendingNaps().count, 0)
+        XCTAssertEqual(try rows(store).first?.healthWrittenStart, hour(8.5))
+    }
+
+    // MARK: The session's wiring
+
+    /// The session's pass reads the PERSISTED archive: a nap the archive holds whole is stored even
+    /// when this drain pulled one epoch of it.
+    func testTheSessionPassJudgesThePersistedArchive() throws {
+        let suite = "test.RingNapArchiveStoreTests"
+        UserDefaults().removePersistentDomain(forName: suite)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let archiveStore = EpochArchiveStore(namespace: "ring-A", UserDefaults(suiteName: suite)!)
+        let all = timeline(from: 13, [(.awake, 30), (.asleep, 70), (.awake, 70)])
+        archiveStore.merge(all)
+
+        let store = try makeStore()
+        RingSession.persistNaps(archiveStore: archiveStore, bulkRecords: Array(all.suffix(1)), rehydrated: [],
+                                temperatures: [], store: store)
+        XCTAssertEqual(try rows(store).count, 1)
+        assertWindow(try rows(store).first, 13.5, 13.5 + 70 / 60.0)
     }
 
     // MARK: Manual naps keep precedence

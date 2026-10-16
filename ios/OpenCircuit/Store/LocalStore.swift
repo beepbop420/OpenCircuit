@@ -3278,12 +3278,17 @@ struct LocalStore {
         let lo = ([start] + mirrored.map(\.start)).min() ?? start
         let hi = ([end] + mirrored.map(\.end)).max() ?? end
         // The flush's clean deletes this app's sleep samples across everything these rows wrote, so
-        // it must never reach another nap: one the user added or edited, or the other device's.
-        // There, keep the old in-place upsert and leave Health as it is.
-        if !replaced.isEmpty || !mirrored.isEmpty,
-           otherNapReaches(lo, hi, except: group) {
-            try saveNapInPlace(exact, start: start, end: end, asleepMin: asleepMin,
-                               isLongNap: isLongNap, segments: segments)
+        // it must never reach another nap (one the user added or edited, or the other device's) or a
+        // stored night. There the rewrite is SKIPPED and Health keeps what it has: a same-start row
+        // gets the old in-place update, and a different start leaves the stored row as written (a
+        // second row would put the nap in Health twice). Skipping deletes nothing and duplicates
+        // nothing. A night stored AFTER the re-arm is kept out by `staleNapHealthSpan`, which clips.
+        if !mirrored.isEmpty,
+           otherNapReaches(lo, hi, except: group)
+            || storedNightWindows(near: lo, hi).contains(where: { lo <= $0.end && hi >= $0.start }) {
+            if let exact {
+                try saveNapInPlace(exact, end: end, asleepMin: asleepMin, isLongNap: isLongNap, segments: segments)
+            }
             return
         }
 
@@ -3326,6 +3331,23 @@ struct LocalStore {
         return DateInterval(start: row.start, end: row.end)
     }
 
+    /// Every stored night's recorded in-bed window, and the edited window of an edited night, near
+    /// `[start, end]` (the same ±2 day reach as `overlapsStoredNight`).
+    private func storedNightWindows(near start: Date, _ end: Date) -> [DateInterval] {
+        let lo = Calendar.current.date(byAdding: .day, value: -2, to: start) ?? start
+        let hi = Calendar.current.date(byAdding: .day, value: 2, to: end) ?? end
+        let rows = (try? context.fetch(FetchDescriptor<StoredSleepSummary>(
+            predicate: #Predicate { $0.night >= lo && $0.night <= hi }))) ?? []
+        return rows.flatMap { row -> [DateInterval] in
+            var out: [DateInterval] = []
+            if row.inBedEnd > row.inBedStart { out.append(DateInterval(start: row.inBedStart, end: row.inBedEnd)) }
+            if row.isManuallyEdited, row.editedInBedEnd > row.editedInBedStart {
+                out.append(DateInterval(start: row.editedInBedStart, end: row.editedInBedEnd))
+            }
+            return out
+        }
+    }
+
     /// Whether a nap row outside `group` (its window, or what it wrote) touches `[start, end]`.
     /// Touching counts: the clean's HealthKit predicate is not strict at its edges.
     private func otherNapReaches(_ start: Date, _ end: Date, except group: [StoredNap]) -> Bool {
@@ -3340,20 +3362,14 @@ struct LocalStore {
         }
     }
 
-    /// The upsert `saveNap` did before decision 69c: keyed by exact start, `healthWritten` kept.
-    private func saveNapInPlace(_ existing: StoredNap?, start: Date, end: Date, asleepMin: Int,
+    /// The same-start update `saveNap` did before decision 69c: `healthWritten` kept.
+    private func saveNapInPlace(_ existing: StoredNap, end: Date, asleepMin: Int,
                                 isLongNap: Bool, segments: [SleepSegment]) throws {
-        if let existing {
-            existing.end = end
-            existing.asleepMin = asleepMin
-            existing.isLongNap = isLongNap
-            existing.stagedSegments = segments.isEmpty ? nil : segments
-            existing.updatedAt = Date()
-        } else {
-            let row = StoredNap(start: start, end: end, asleepMin: asleepMin, isLongNap: isLongNap)
-            row.stagedSegments = segments.isEmpty ? nil : segments
-            context.insert(row)
-        }
+        existing.end = end
+        existing.asleepMin = asleepMin
+        existing.isLongNap = isLongNap
+        existing.stagedSegments = segments.isEmpty ? nil : segments
+        existing.updatedAt = Date()
         try context.save()
     }
 
@@ -3516,12 +3532,27 @@ struct LocalStore {
 
     /// The span a nap previously mirrored to Health that the CURRENT window no longer covers — what
     /// `flushNaps` must delete before re-writing. Empty when nothing is stale.
+    ///
+    /// Never reaches a stored night (recorded or edited window; touching counts): the clean deletes
+    /// every one of this app's sleep samples overlapping the span, so a night saved after the nap was
+    /// re-armed would lose its in-bed envelope and edge stages. The span is CLIPPED off the night,
+    /// one second clear of it, rather than the clean skipped: the row is already re-armed and its new
+    /// window is about to be written, so skipping would leave the old write beside it. What the old
+    /// write left wholly inside the night's span stays. A night strictly inside the span (no real
+    /// nap and night do that) skips the clean.
     func staleNapHealthSpan(start: Date) -> DateInterval? {
         let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
         guard let row = try? context.fetch(descriptor).first,
               row.healthWrittenEnd > row.healthWrittenStart else { return nil }
-        let lo = min(row.healthWrittenStart, row.effectiveStart)
-        let hi = max(row.healthWrittenEnd, row.effectiveEnd)
+        var lo = min(row.healthWrittenStart, row.effectiveStart)
+        var hi = max(row.healthWrittenEnd, row.effectiveEnd)
+        guard hi > lo else { return nil }
+        for night in storedNightWindows(near: lo, hi).sorted(by: { $0.start < $1.start })
+        where lo <= night.end && hi >= night.start {
+            if night.start <= lo { lo = night.end.addingTimeInterval(1) }
+            else if night.end >= hi { hi = night.start.addingTimeInterval(-1) }
+            else { return nil }
+        }
         guard hi > lo else { return nil }
         return DateInterval(start: lo, end: hi)
     }

@@ -2236,9 +2236,19 @@ final class RingSession: NSObject {
 
     /// Detect daytime naps and persist them (#76), judged over the epoch archive (decision 69).
     private func persistNaps(store: LocalStore) {
-        Self.persistNaps(archive: epochArchiveStore.load(),
-                         drained: bulkRecords.filter { !rehydratedCounters.contains($0.counter) },
-                         temperatures: wearTemperatureSamples(), store: store)
+        Self.persistNaps(archiveStore: epochArchiveStore, bulkRecords: bulkRecords,
+                         rehydrated: rehydratedCounters, temperatures: wearTemperatureSamples(), store: store)
+    }
+
+    /// What the session's pass judges: the PERSISTED archive (the store `restageFromArchive` loads),
+    /// and this drain's own pulled records (`bulkRecords` minus re-hydrated counters). Takes the
+    /// archive store itself, not records, so the wrapper above cannot feed it the drain slice as the
+    /// archive, and a test can drive the same wiring.
+    static func persistNaps(archiveStore: EpochArchiveStore, bulkRecords: [BulkRecord], rehydrated: Set<UInt32>,
+                            temperatures: [TemperatureSample], store: LocalStore) {
+        persistNaps(archive: archiveStore.load(),
+                    drained: bulkRecords.filter { !rehydrated.contains($0.counter) },
+                    temperatures: temperatures, store: store)
     }
 
     /// The ring's nap pass (#76, decision 69), static so it is testable without a peripheral.
