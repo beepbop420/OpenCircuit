@@ -567,8 +567,7 @@ final class HealthKitWriter {
         // before the `.inBed` layer and the inclusive stage end (decision 70h, forward-only).
         for night in strapNights where SleepHealthGate.isReadyToWrite(
             latestSegmentEnd: night.map(\.end).max(), now: Date(), finalized: strapNightsFinalized) {
-            switch await mirrorSettledNight(local: store, segments: night,
-                                            alsoWrittenAs: HelioSleepSelection.shapesBeforeInBedAndInclusiveEnd(night)) {
+            switch await mirrorStrapNight(local: store, segments: night) {
             case .wrote(let count):
                 result.sleepSegments += count
                 writtenKinds.insert(.sleep)
@@ -2635,6 +2634,15 @@ final class HealthKitWriter {
         let pred = subs.count == 1 ? subs[0] : NSCompoundPredicate(andPredicateWithSubpredicates: subs)
         _ = try? await store.deleteObjects(of: type, predicate: pred)
         return surviving
+    }
+
+    /// A strap night's mirror (#215): `mirrorSettledNight` with the shapes a build before decisions 70b
+    /// and 70e wrote for it (`HelioSleepSelection.shapesBeforeInBedAndInclusiveEnd`), so a night Health
+    /// already holds is not rewritten for its `.inBed` layer or its stage end's extra minute alone
+    /// (decision 70h). The flush's strap loop calls this; the ring never does.
+    func mirrorStrapNight(local: LocalStore, segments: [SleepSegment]) async -> MirrorOutcome {
+        await mirrorSettledNight(local: local, segments: segments,
+                                 alsoWrittenAs: HelioSleepSelection.shapesBeforeInBedAndInclusiveEnd(segments))
     }
 
     /// `declined` (#259) is a refusal that the same segments would meet again on every flush —
