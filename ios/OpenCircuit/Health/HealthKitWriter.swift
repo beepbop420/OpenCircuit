@@ -785,26 +785,42 @@ final class HealthKitWriter {
             // did record there, and the edit only moved the edges — the nap-scale
             // `.assertedOverMeasured`.
             do {
-                // WRITE FIRST, THEN CLEAN — the same ordering `reconcileEditedNightSleep` uses, so a
-                // HealthKit failure can never leave Health emptier than before. `editNap` re-arms
-                // `healthWritten` when a shrink or a move leaves a previously-mirrored span
-                // uncovered; without this, that stale sleep stayed in Apple Health permanently
-                // because `pendingNaps()` never offered the row again.
-                let uuids = try await writeReturningSleepUUIDs(segs,
-                                                               userEntered: nap.isManuallyAdded)
-                if let stale = store.staleNapHealthSpan(start: nap.start) {
-                    await deleteStaleNapSleep(stale, keeping: uuids,
-                                              current: nap.effectiveStart ..< nap.effectiveEnd)
-                }
-                try store.markNapWritten(start: nap.start)
+                try await Self.mirrorNap(nap, segments: segs, store: store,
+                                         write: { try await self.writeReturningSleepUUIDs($0, userEntered: $1) },
+                                         deleteStale: { await self.deleteStaleNapSleep($0, keeping: $1, current: $2) })
                 written += 1
             } catch { pendingFlushFailures.insert(.sleep); break }   // surface + stop; naps retry next flush
         }
         return written
     }
 
+    /// One pending nap's mirror. Static with the two HealthKit effects passed in, so the order and
+    /// the spans are testable without a live `HKHealthStore` (the `activeEnergySample` seam's reason).
+    ///
+    /// WRITE FIRST, THEN CLEAN — the same ordering `reconcileEditedNightSleep` uses, so a HealthKit
+    /// failure can never leave Health emptier than before. `editNap` re-arms `healthWritten` when a
+    /// shrink or a move leaves a previously-mirrored span uncovered, and `saveNap` when a re-detected
+    /// nap's window moved (decision 69c); without this, that stale sleep stayed in Apple Health
+    /// permanently because `pendingNaps()` never offered the row again.
+    ///
+    /// An edited nap keeps samples inside its current window out of the clean (the edit path's rule).
+    /// A re-detected nap does not: its earlier write lies INSIDE the grown window, so that exclusion
+    /// would spare exactly the samples that duplicate it. The samples just written are kept by UUID.
+    static func mirrorNap(_ nap: StoredNap, segments: [SleepSegment], store: LocalStore,
+                          write: ([SleepSegment], Bool) async throws -> [String],
+                          deleteStale: (DateInterval, [String], Range<Date>) async -> Void) async throws {
+        let uuids = try await write(segments, nap.isManuallyAdded)
+        if let stale = store.staleNapHealthSpan(start: nap.start) {
+            let manual = nap.isManuallyAdded || nap.isManuallyEdited
+            let current = manual ? nap.effectiveStart ..< nap.effectiveEnd : nap.effectiveStart ..< nap.effectiveStart
+            await deleteStale(stale, uuids, current)
+        }
+        try store.markNapWritten(start: nap.start)
+    }
+
     /// Delete this app's sleep samples across a nap's previously-mirrored span, EXCLUDING the
-    /// samples just written and anything inside the nap's current window. Own-samples-only, so a
+    /// samples just written and anything inside `current` (an edited nap's window; empty for a
+    /// re-detected one, see `mirrorNap`). Own-samples-only, so a
     /// night's sleep or another app's data is never touched. Best-effort: a failure leaves a
     /// transient duplicate the next edit cleans up, which is strictly better than deleting
     /// optimistically and losing the record.

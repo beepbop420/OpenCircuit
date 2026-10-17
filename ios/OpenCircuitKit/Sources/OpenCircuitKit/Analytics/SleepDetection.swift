@@ -202,8 +202,17 @@ public struct ActivityPeriod: Equatable, Sendable {
     /// now. A clean single-block night (every existing single-night test) returns that block verbatim.
     public static func mainSleepBlock(_ periods: [ActivityPeriod],
                                       maxPause: TimeInterval = maxSleepPause) -> ActivityPeriod? {
+        guard let best = sleepClusters(periods, maxPause: maxPause).max(by: { $0.duration < $1.duration }),
+              best.duration > minSleepDuration else { return nil }
+        return best
+    }
+
+    /// Every clustered span of sleep periods, chronologically: the chaining `mainSleepBlock` does,
+    /// without picking one or applying a length floor. Lets a caller holding more than one night
+    /// (the ring's nap pass over the 30 h archive, decision 69) see each night, not just the longest.
+    public static func sleepClusters(_ periods: [ActivityPeriod],
+                                     maxPause: TimeInterval = maxSleepPause) -> [ActivityPeriod] {
         let sleeps = periods.filter { $0.activity == .sleep }.sorted { $0.start < $1.start }
-        guard !sleeps.isEmpty else { return nil }
         var clusters: [(start: Date, end: Date)] = []
         for s in sleeps {
             if let last = clusters.last, s.start.timeIntervalSince(last.end) < maxPause {
@@ -212,10 +221,7 @@ public struct ActivityPeriod: Equatable, Sendable {
                 clusters.append((s.start, s.end))
             }
         }
-        guard let best = clusters.max(by: {
-            $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start)
-        }), best.end.timeIntervalSince(best.start) > minSleepDuration else { return nil }
-        return ActivityPeriod(activity: .sleep, start: best.start, end: best.end)
+        return clusters.map { ActivityPeriod(activity: .sleep, start: $0.start, end: $0.end) }
     }
 
     /// Detect Sleep/Active periods from a gravity-vector timeline.

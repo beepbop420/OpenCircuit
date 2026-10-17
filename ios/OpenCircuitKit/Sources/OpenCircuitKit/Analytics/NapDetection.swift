@@ -52,6 +52,15 @@ public enum NapDetection {
                             mainSleep: ActivityPeriod?,
                             temperatures: [TemperatureSample] = [],
                             epoch: Int = Command.syncEpoch) -> [Nap] {
+        naps(from: records, excluding: mainSleep.map { [$0] } ?? [], temperatures: temperatures, epoch: epoch)
+    }
+
+    /// `naps(from:mainSleep:)` with any number of excluded spans: a candidate overlapping one of
+    /// them is not a nap.
+    public static func naps(from records: [BulkRecord],
+                            excluding excluded: [ActivityPeriod],
+                            temperatures: [TemperatureSample] = [],
+                            epoch: Int = Command.syncEpoch) -> [Nap] {
         let timeline = BulkSleep.motionTimeline(from: records, epoch: epoch)
         let periods = ActivityPeriod.detectFromMotion(timeline, temperatureSamples: temperatures)
 
@@ -59,7 +68,7 @@ public enum NapDetection {
             guard p.activity == .sleep else { return nil }
             guard p.duration >= minNapDuration else { return nil }
             // Exclude the main overnight sleep (and anything overlapping it) — no double-count.
-            if let main = mainSleep, p.start < main.end && p.end > main.start { return nil }
+            if excluded.contains(where: { p.start < $0.end && p.end > $0.start }) { return nil }
             // Daytime only: a block whose MIDPOINT is at night is (another) night/long sleep,
             // not a nap — reuse the overnight-block test (inverted) so the rule matches the
             // main-night gate exactly.
@@ -79,6 +88,85 @@ public enum NapDetection {
             return Nap(start: p.start, end: p.end, segments: segs)
         }
         .sorted { $0.start < $1.start }
+    }
+
+    // MARK: The ring's nap pass (decision 69, #307)
+
+    /// The records the ring's nap pass judges, and whether their oldest record is where retention
+    /// cut the archive.
+    public struct RingNapInput: Equatable {
+        public let records: [BulkRecord]
+        /// Retention pruned records within `ActivityPeriod.maxSleepPause` of the oldest one kept, and
+        /// this pass did not drain that stretch itself. Sleep there may be the rest of a cluster
+        /// that is gone, so its extent is unknown.
+        public let headIsRetentionCut: Bool
+        public init(records: [BulkRecord], headIsRetentionCut: Bool) {
+            self.records = records; self.headIsRetentionCut = headIsRetentionCut
+        }
+    }
+
+    /// Decision 69b: the ring judges naps over the retained archive union, so a nap split across
+    /// drains and orphan banks is judged whole once the archive holds all of it. `drained` is this
+    /// pass's own slice: it adds only what retention already dropped (a backlog over 30 h), so a
+    /// nap the drain alone would have judged is never lost to the archive's window.
+    public static func ringNapInput(archive: [BulkRecord], drained: [BulkRecord],
+                                    retention: TimeInterval = EpochArchive.retention) -> RingNapInput {
+        var byCounter: [UInt32: BulkRecord] = [:]
+        for r in drained { byCounter[r.counter] = r }
+        for r in archive { byCounter[r.counter] = r }
+        let records = byCounter.values.sorted { $0.counter < $1.counter }
+        guard let head = archive.map(\.counter).min(), let newest = archive.map(\.counter).max() else {
+            return RingNapInput(records: records, headIsRetentionCut: false)
+        }
+        let pause = UInt32(ActivityPeriod.maxSleepPause)
+        let pruned = TimeInterval(newest - head) > retention - ActivityPeriod.maxSleepPause
+        let drainedHead = drained.contains { $0.counter < head + pause }
+        return RingNapInput(records: records, headIsRetentionCut: pruned && !drainedHead)
+    }
+
+    /// The ring's naps over `input` (decision 69).
+    ///
+    /// 69a: a clustered sleep block excludes naps as a main sleep only if
+    /// `SleepWindow.isOvernightBlock(start:end:)` accepts it. Over one daytime drain the longest
+    /// still cluster is the nap itself, and once it passed an hour it excluded itself (#307). Every
+    /// overnight block is excluded, not only the longest, because the archive can hold two nights.
+    /// A stored night is also kept out by `LocalStore.saveNap`'s `overlapsStoredNight`.
+    ///
+    /// At a retention cut, nothing within `maxSleepPause` of the head (or in a cluster starting
+    /// there) is judged: it may be a night's tail whose start is gone. Each such nap was judged
+    /// whole on the earlier passes, while it sat further from the head.
+    ///
+    /// 69d, the tail twin: a sleep cluster whose end is within `maxSleepPause` of the newest record
+    /// (any layout, worn or not) is still open and is not judged on this pass. It is judged on a
+    /// later pass once the records extend past it, or never if it becomes overnight. Without this an
+    /// evening sleep in progress kept a daytime midpoint until it passed 21:00 and was stored, and
+    /// written to Health, as a nap of up to about 3 h; and a daytime nap in progress was rewritten on
+    /// every pass. The cost: a nap is stored about an hour after it ends. A candidate ending inside
+    /// that last hour is left for later the same way, whichever detector saw it. An archive whose
+    /// newest record is old (no drain for hours) did extend past its naps, so they are judged.
+    public static func ringNaps(from input: RingNapInput,
+                                temperatures: [TemperatureSample] = [],
+                                epoch: Int = Command.syncEpoch) -> [Nap] {
+        guard let first = input.records.first else { return [] }
+        let clusters = BulkSleep.sleepClusters(from: input.records, temperatures: temperatures, epoch: epoch)
+        var excluded = clusters.filter {
+            $0.duration > ActivityPeriod.minSleepDuration
+                && SleepWindow.isOvernightBlock(start: $0.start, end: $0.end)
+        }
+        if input.headIsRetentionCut {
+            let head = first.date(epoch: epoch)
+            let reach = head.addingTimeInterval(ActivityPeriod.maxSleepPause)
+            let end = clusters.filter { $0.start < reach }.map(\.end).max() ?? reach
+            excluded.append(ActivityPeriod(activity: .sleep, start: head, end: max(end, reach)))
+        }
+        if let last = input.records.last {
+            let newest = last.date(epoch: epoch)
+            let openFrom = newest.addingTimeInterval(-ActivityPeriod.maxSleepPause)
+            let start = clusters.filter { $0.end > openFrom }.map(\.start).min() ?? openFrom
+            excluded.append(ActivityPeriod(activity: .sleep, start: min(start, openFrom),
+                                           end: newest.addingTimeInterval(TimeInterval(BulkRecord.epochSeconds))))
+        }
+        return naps(from: input.records, excluding: excluded, temperatures: temperatures, epoch: epoch)
     }
 
     /// Fraction of a candidate block's WORN epochs the ring measured as sleep (sleep-vitals layout).

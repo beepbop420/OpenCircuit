@@ -2047,8 +2047,7 @@ final class RingSession: NSObject {
     /// Persist the night's summary + extras. `nightRecords` is the stitched, night-scoped union the
     /// staging came from, so the per-stage HR / movement / stress / resting HR / Sleep Score are
     /// computed over the WHOLE night — not just the final drained slice (which on a multi-drain night
-    /// would skew every derived metric). Naps stay on the per-drain `bulkRecords` (they're daytime,
-    /// outside the night-scoped union).
+    /// would skew every derived metric). Naps are judged over the whole archive (`persistNaps`).
     private func persistSleepAndSteps(nightRecords: [BulkRecord]) {
         guard let localStore else { return }
         // Migrate BEFORE the reads, not just before the write. `computeSleepExtras` and
@@ -2066,9 +2065,8 @@ final class RingSession: NSObject {
         // only signal a tester's export carried was `sleepCommitted: true`, which meant "the stage
         // path ran" and was reported on drain after drain for a night that had NO stored row.
         var outcome: SleepPersistOutcome = nightKeyReady ? .noStagedSegments : .deferredNightKeyMigration
-        // ⚠️ The deferral covers the NIGHT only. `persistNaps` below runs off THIS drain's buffer
-        // (minus re-hydrated counters) and the next drain clears it, so a nap skipped here is gone —
-        // unlike the night, which `restageFromArchive` re-derives from the 30 h archive.
+        // ⚠️ The deferral covers the NIGHT only. `persistNaps` below still runs; it judges the 30 h
+        // archive (decision 69), so a nap is judged again on every later pass, like the night.
         if nightKeyReady, !stagedSegments.isEmpty {
             let summary = SleepStaging.summary(stagedSegments)
             // Real sleep-window clock times (segments carry the dates; Summary doesn't) — so a
@@ -2117,8 +2115,8 @@ final class RingSession: NSObject {
         } else {
             ringLog.notice("sleep-persist: \(detail, privacy: .public)")
         }
-        // Naps are detected over the whole drained window (independent of the overnight gate)
-        // so a daytime-only sync still records them, never folded into the main night (#76).
+        // Naps are detected over the archive (independent of the overnight gate) so a daytime-only
+        // sync still records them, never folded into the main night (#76, decision 69).
         persistNaps(store: localStore)
         // A PREVIOUSLY EDITED night may have been scored against a SHORTER archive than the one we
         // now hold — see below. Runs here because this is the one function every commit path and
@@ -2236,22 +2234,37 @@ final class RingSession: NSObject {
         return extras
     }
 
-    /// Detect daytime naps over the drained records and persist them (#76). Excludes the main
-    /// overnight block so naps never double-count against the night; the wear gate (#41) drops
-    /// off-wrist/charging stillness the same way the night does.
+    /// Detect daytime naps and persist them (#76), judged over the epoch archive (decision 69).
     private func persistNaps(store: LocalStore) {
-        // Scoped to what this drain actually PULLED, not the whole buffer. `bulkRecords` can now also
-        // carry re-hydrated archive records spanning the full 30 h retention (#188 follow-up), and
-        // `EpochArchive` explicitly warns that retention holds TWO nights. `mainSleep` picks the
-        // single longest still-block, so over a two-night span it excludes one night and leaves the
-        // OTHER one eligible — which `NapDetection` would then write out as a multi-hour "nap".
-        // Every other consumer of a widened buffer scopes itself (`latestNightRecords`); this one did
-        // not. Nap detection is a same-day feature, so the drain's own slice is the right domain.
-        let napRecords = bulkRecords.filter { !rehydratedCounters.contains($0.counter) }
-        guard !napRecords.isEmpty else { return }
-        let main = BulkSleep.mainSleep(from: napRecords, temperatures: wearTemperatureSamples())
-        let naps = NapDetection.naps(from: napRecords, mainSleep: main,
-                                     temperatures: wearTemperatureSamples())
+        Self.persistNaps(archiveStore: epochArchiveStore, bulkRecords: bulkRecords,
+                         rehydrated: rehydratedCounters, temperatures: wearTemperatureSamples(), store: store)
+    }
+
+    /// What the session's pass judges: the PERSISTED archive (the store `restageFromArchive` loads),
+    /// and this drain's own pulled records (`bulkRecords` minus re-hydrated counters). Takes the
+    /// archive store itself, not records, so the wrapper above cannot feed it the drain slice as the
+    /// archive, and a test can drive the same wiring.
+    static func persistNaps(archiveStore: EpochArchiveStore, bulkRecords: [BulkRecord], rehydrated: Set<UInt32>,
+                            temperatures: [TemperatureSample], store: LocalStore) {
+        persistNaps(archive: archiveStore.load(),
+                    drained: bulkRecords.filter { !rehydrated.contains($0.counter) },
+                    temperatures: temperatures, store: store)
+    }
+
+    /// The ring's nap pass (#76, decision 69), static so it is testable without a peripheral.
+    ///
+    /// Judged over the retained archive union, the same source `restageFromArchive` stages from, not
+    /// one drain's slice: by day the ring drains about hourly and pages also arrive as orphan banks,
+    /// so a nap reached the phone in pieces, each judged alone, and a piece under 15 min could never
+    /// be a nap and was never looked at again (#307). `drained` is this pass's own slice, minus
+    /// re-hydrated counters; it adds only what retention already dropped. Only OVERNIGHT sleep blocks
+    /// exclude naps (`NapDetection.ringNaps`): the archive holds up to two nights, and on one
+    /// daytime drain the longest still block is the nap itself. The wear gate (#41) drops
+    /// off-wrist/charging stillness the same way the night does.
+    static func persistNaps(archive: [BulkRecord], drained: [BulkRecord],
+                            temperatures: [TemperatureSample], store: LocalStore) {
+        let input = NapDetection.ringNapInput(archive: archive, drained: drained)
+        let naps = NapDetection.ringNaps(from: input, temperatures: temperatures)
         for nap in naps {
             // Don't re-add a detected nap that overlaps a MANUAL nap (user-added/edited): the manual
             // one is authoritative and may sit at a different start key, so saveNap's same-start
