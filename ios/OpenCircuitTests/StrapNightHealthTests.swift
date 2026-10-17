@@ -47,7 +47,8 @@ private func session(_ stages: [(Double, Double, UInt8)]) -> [UInt8] {
     put(le16(minute(stages.last!.1)), at: 0x00C)
     r[0x016] = 81
     r[0x054] = UInt8(stages.count)
-    for (i, stage) in stages.enumerated() { put(le16(minute(stage.0)) + le16(minute(stage.1)) + [stage.2], at: 0x056 + 5 * i) }
+    // §6.6 (decision 70e): a stage's end minute is inclusive, so a stage ending at `end` is written as `end − 1`.
+    for (i, stage) in stages.enumerated() { put(le16(minute(stage.0)) + le16(minute(stage.1) - 1) + [stage.2], at: 0x056 + 5 * i) }
     return r
 }
 

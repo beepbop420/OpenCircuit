@@ -36,7 +36,8 @@ private func sessionRecord(midnightRef: TimeInterval = midnight, stages: [(start
     r[0x016] = score
     r[0x054] = UInt8(stages.count)
     for (i, s) in stages.enumerated() {
-        put(le16(s.start) + le16(s.end) + [s.type], at: 0x056 + 5 * i)
+        // §6.6 (decision 70e): a stage's end minute is inclusive, so a stage ending at `end` is written as `end − 1`.
+        put(le16(s.start) + le16(s.end - 1) + [s.type], at: 0x056 + 5 * i)
     }
     return r
 }

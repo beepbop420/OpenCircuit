@@ -58,7 +58,8 @@ private func sessionRecord() -> [UInt8] {
     r[0x016] = 81
     let stages: [(UInt16, UInt16, UInt8)] = [(1380, 1500, 0x04), (1500, 1560, 0x05), (1560, 1620, 0x08), (1620, 1860, 0x04)]
     r[0x054] = UInt8(stages.count)
-    for (i, s) in stages.enumerated() { put(le16(s.0) + le16(s.1) + [s.2], at: 0x056 + 5 * i) }
+    // §6.6 (decision 70e): a stage's end minute is inclusive, so a stage ending at `end` is written as `end − 1`.
+    for (i, s) in stages.enumerated() { put(le16(s.0) + le16(s.1 - 1) + [s.2], at: 0x056 + 5 * i) }
     return r
 }
 
@@ -805,7 +806,8 @@ final class DeviceOwnershipAppTests: XCTestCase {
         r[0x016] = 81
         r[0x054] = UInt8(stages.count)
         for (i, stage) in stages.enumerated() {
-            put(le16(minute(stage.0)) + le16(minute(stage.1)) + [stage.2], at: 0x056 + 5 * i)
+            // §6.6 (decision 70e): a stage's end minute is inclusive, so a stage ending at `end` is written as `end − 1`.
+            put(le16(minute(stage.0)) + le16(minute(stage.1) - 1) + [stage.2], at: 0x056 + 5 * i)
         }
         return r
     }
