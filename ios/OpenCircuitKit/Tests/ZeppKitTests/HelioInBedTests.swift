@@ -232,3 +232,92 @@ final class HelioInclusiveStageEndTests: XCTestCase {
         XCTAssertEqual(HelioSleepSelection.shapesBeforeInBedAndInclusiveEnd([]), [])
     }
 }
+
+/// Decision 70j (review-311 B1): stitching judges a re-delivered duplicate on the stage spans, and two
+/// fragments' `.inBed` spans never overlap. Wire minutes, stage end minutes inclusive.
+final class HelioStitchedInBedTests: XCTestCase {
+    private let now = date(reference + 10 * 3600)
+
+    private func inBeds(_ night: HelioSleepSelection.Night) -> [DateInterval] {
+        night.segments.filter { $0.stage == .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
+    }
+
+    private func stages(_ night: HelioSleepSelection.Night) -> [DateInterval] {
+        night.segments.filter { $0.stage != .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
+    }
+
+    /// No two `.inBed` segments overlap, and time in bed is their sum (nothing counted twice).
+    private func assertInBedNotDoubleCounted(_ night: HelioSleepSelection.Night, inBed minutes: Int,
+                                             file: StaticString = #filePath, line: UInt = #line) {
+        let spans = inBeds(night).sorted { $0.start < $1.start }
+        for (a, b) in zip(spans, spans.dropFirst()) {
+            XCTAssertLessThanOrEqual(a.end, b.start, "the .inBed segments overlap", file: file, line: line)
+        }
+        XCTAssertEqual(SleepStaging.summary(night.segments).inBed, TimeInterval(minutes * 60), file: file, line: line)
+        XCTAssertEqual(spans.reduce(0) { $0 + $1.duration }, TimeInterval(minutes * 60), file: file, line: line)
+    }
+
+    private func stitchedNight(_ records: [[UInt8]]) throws -> HelioSleepSelection.Night {
+        let nights = HelioSleepSelection.nights(from: try sessions(records), now: now)
+        XCTAssertEqual(nights.count, 1, "one stitched night")
+        return try XCTUnwrap(nights.first)
+    }
+
+    /// P1: the later session's lead-in reaches into the earlier one's record span. Both halves are kept;
+    /// the later `.inBed` starts where the earlier one ends.
+    func testALeadInReachingIntoTheEarlierSessionKeepsBothHalves() throws {
+        let night = try stitchedNight([record48(sleep: (1380, 1500), stages: [(1380, 1499, light)]),
+                                       record48(sleep: (1490, 1860), stages: [(1520, 1859, deep)])])
+        XCTAssertEqual(stages(night), [span(1380, 1500), span(1520, 1860)], "both sessions' stages, as reported")
+        XCTAssertEqual(SleepStaging.summary(night.segments).minutes.asleep, 460)
+        XCTAssertEqual(inBeds(night), [span(1380, 1500), span(1500, 1860)])
+        XCTAssertEqual(night.window, span(1380, 1860))
+        assertInBedNotDoubleCounted(night, inBed: 480)
+    }
+
+    /// P2: the earlier session's record end trails past the later session's first stage. The earlier
+    /// `.inBed` ends at that first stage, where the later one starts.
+    func testATrailingRecordEndPastTheNextSessionsFirstStageKeepsBothHalves() throws {
+        let night = try stitchedNight([record48(sleep: (1380, 1530), stages: [(1380, 1499, light)]),
+                                       record48(sleep: (1520, 1860), stages: [(1520, 1859, deep)])])
+        XCTAssertEqual(stages(night), [span(1380, 1500), span(1520, 1860)])
+        XCTAssertEqual(SleepStaging.summary(night.segments).minutes.asleep, 460)
+        XCTAssertEqual(inBeds(night), [span(1380, 1520), span(1520, 1860)])
+        XCTAssertEqual(night.window, span(1380, 1860))
+        assertInBedNotDoubleCounted(night, inBed: 480)
+    }
+
+    /// P3, the control: record spans equal to the stage spans. Two `.inBed` segments, the gap uncovered.
+    func testRecordSpansEqualToTheStagesStitchWithTheGapLeftOut() throws {
+        let night = try stitchedNight([record48(sleep: (1380, 1500), stages: [(1380, 1499, light)]),
+                                       record48(sleep: (1520, 1860), stages: [(1520, 1859, deep)])])
+        XCTAssertEqual(SleepStaging.summary(night.segments).minutes.asleep, 460)
+        XCTAssertEqual(inBeds(night), [span(1380, 1500), span(1520, 1860)])
+        assertInBedNotDoubleCounted(night, inBed: 460)
+    }
+
+    /// P4: the nap split stitches through the same rule. A 13:00–14:00 sleep and a later one whose lead-in
+    /// reaches back into it (in bed 13:50, stages 14:30–16:00) are one nap with both halves.
+    func testANapWhoseLeadInReachesIntoAnEarlierSleepKeepsBothHalves() throws {
+        let later = date(reference + 18 * 3600)
+        let sleeps = try sessions([record48(sleep: (2220, 2280), stages: [(2220, 2279, light)]),
+                                   record48(sleep: (2270, 2400), stages: [(2310, 2399, deep)])])
+            .compactMap { HelioSleepSelection.night(from: $0, now: later) }
+        let split = HelioSleepSelection.naps(from: sleeps, mainSleeps: [], now: later)
+        XCTAssertEqual(split.naps.count, 1)
+        let nap = try XCTUnwrap(split.naps.first)
+        XCTAssertEqual(stages(nap), [span(2220, 2280), span(2310, 2400)])
+        XCTAssertEqual(SleepStaging.summary(nap.segments).minutes.asleep, 150)
+        XCTAssertEqual(inBeds(nap), [span(2220, 2280), span(2280, 2400)])
+        XCTAssertEqual(nap.window, span(2220, 2400))
+        assertInBedNotDoubleCounted(nap, inBed: 180)
+    }
+
+    /// A re-delivered session is still a duplicate when its record span differs: same stages, dropped.
+    func testAReDeliveredSessionWithADifferentRecordSpanIsStillADuplicate() throws {
+        let night = try stitchedNight([record48(sleep: (1380, 1860), stages: contiguous),
+                                       record48(sleep: (1350, 1861), stages: contiguous)])
+        XCTAssertEqual(SleepStaging.summary(night.segments).minutes.asleep, 480, "counted once")
+        XCTAssertEqual(inBeds(night), [span(1380, 1860)], "the first copy's")
+    }
+}

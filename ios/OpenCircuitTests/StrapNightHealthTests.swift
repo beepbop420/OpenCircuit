@@ -1829,3 +1829,29 @@ extension StrapNightHealthTests {
         XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(14)), [])
     }
 }
+
+extension StrapNightHealthTests {
+    /// Decision 70k (review-311 S1): a night an earlier build wrote (00:30–08:49, stages only), re-delivered
+    /// with the same stages and a record end of 09:05. Its in-bed span alone extends the written night by
+    /// 10 minutes or more, so 58b stores it and the flush rewrites it once (70h's no-rewrite guard is not
+    /// for an extension). After that nothing offers it again, at +14 h, +20 h or +34 h.
+    func testAnExtensionThroughTheInBedSpanAloneIsRewrittenOnceAndNotOfferedAgain() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let (key, _) = try storeAndWriteAsAnEarlierBuild(finalNight, store: store)
+        let recordEnd = 9 + 5.0 / 60
+        let later = try syncRecords([recordSession(finalNight, record: 0.5, recordEnd)], at: hour(9.5), store: store)
+        let extended = DateInterval(start: hour(0.5), end: hour(recordEnd))
+        XCTAssertEqual(later.nights.map(\.window), [extended], "58b: stored as an extension")
+        XCTAssertEqual(try XCTUnwrap(try rows(store).first).inBedEnd, hour(recordEnd))
+        let written = try await strapFlush(later.nights.map(\.segments), at: hour(9.5), store: store)
+        XCTAssertEqual(written, [extended], "rewritten once")
+        let record = mirrorRecord(store, key)
+        for offset in [14.0, 20, 34] {
+            XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9.5 + offset)), [], "+\(offset) h")
+            let again = try await strapFlush([], at: hour(9.5 + offset), store: store)
+            XCTAssertEqual(again, [], "+\(offset) h")
+        }
+        XCTAssertEqual(mirrorRecord(store, key), record, "Health keeps the rewrite")
+    }
+}

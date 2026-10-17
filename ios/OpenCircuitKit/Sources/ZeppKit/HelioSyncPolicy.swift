@@ -355,14 +355,19 @@ public enum HelioSleepSelection {
     }
 
     /// The single stitching rule (decision 28f), for anything that turns strap sleeps into nights or
-    /// naps: oldest first; a sleep whose window overlaps an earlier one is dropped (the strap
-    /// re-delivers sessions on an overlapping fetch); sleeps `stitchGap` or less apart become ONE
+    /// naps: oldest first by their stages; a sleep whose STAGES overlap an earlier one's is dropped (the
+    /// strap re-delivers sessions on an overlapping fetch); sleeps `stitchGap` or less apart become ONE
     /// (their segments stay exactly as reported, and the gap between them stays a gap: no segment is
     /// invented for it), unless the result would exceed `maxNightLength`.
+    ///
+    /// Decision 70j (review-311 B1): the duplicate is judged on the stage spans, never on the in-bed
+    /// `window`. A session's record span can reach into its neighbour's (a lead-in, a trailing end), and
+    /// judged on the window that dropped the whole neighbour. The gap and the length are the window's
+    /// (70d).
     public static func stitch(_ sleeps: [Night]) -> [Night] {
         var out: [Night] = []
-        for night in sleeps.sorted(by: { $0.window.start < $1.window.start }) {
-            if let last = out.last, last.window.end > night.window.start { continue }
+        for night in sleeps.sorted(by: { stageSpan(of: $0).start < stageSpan(of: $1).start }) {
+            if let last = out.last, stageSpan(of: last).end > stageSpan(of: night).start { continue }
             if let last = out.last,
                night.window.start.timeIntervalSince(last.window.end) <= stitchGap,
                night.window.end.timeIntervalSince(last.window.start) <= maxNightLength {
@@ -374,13 +379,46 @@ public enum HelioSleepSelection {
         return out
     }
 
+    /// First stage start … last stage end (the non-`.inBed` segments); the window when there are none.
+    static func stageSpan(of night: Night) -> DateInterval {
+        let stages = night.segments.filter { $0.stage != .inBed }
+        guard let start = stages.map(\.start).min(), let end = stages.map(\.end).max(), end > start else { return night.window }
+        return DateInterval(start: start, end: end)
+    }
+
     /// Two sessions as one night: both segment lists as reported (each with its own `.inBed` segment,
     /// decision 70b), the window spanning both, the longer session's score and the first's recorded zone.
+    ///
+    /// Decision 70j: one `.inBed` per fragment, never overlapping, both halves kept. When the earlier
+    /// fragment's `.inBed` overlaps the later one's, the later one starts where the earlier ends; if that
+    /// would start after the later fragment's first stage, the earlier one ends at that first stage
+    /// instead (and the later one starts there, so the two still don't overlap). The stages are never
+    /// touched, and the window is the union of the `.inBed` spans.
     static func stitched(_ first: Night, _ second: Night) -> Night {
-        Night(segments: first.segments + second.segments,
-              window: DateInterval(start: first.window.start, end: second.window.end),
-              strapScore: second.window.duration > first.window.duration ? second.strapScore : first.strapScore,
-              recordedTimeZone: first.recordedTimeZone ?? second.recordedTimeZone)
+        var earlier = first.segments
+        var later = second.segments
+        if let e = earlier.lastIndex(where: { $0.stage == .inBed }),
+           let l = later.firstIndex(where: { $0.stage == .inBed }),
+           earlier[e].end > later[l].start {
+            let laterFirstStage = later.filter { $0.stage != .inBed }.map(\.start).min() ?? later[l].end
+            if earlier[e].end <= laterFirstStage {
+                later[l] = SleepSegment(start: earlier[e].end, end: later[l].end, stage: .inBed)
+            } else {
+                earlier[e] = SleepSegment(start: earlier[e].start, end: laterFirstStage, stage: .inBed)
+                later[l] = SleepSegment(start: laterFirstStage, end: later[l].end, stage: .inBed)
+            }
+        }
+        let segments = earlier + later
+        let inBeds = segments.filter { $0.stage == .inBed }
+        let window: DateInterval
+        if let start = inBeds.map(\.start).min(), let end = inBeds.map(\.end).max() {
+            window = DateInterval(start: start, end: end)
+        } else {
+            window = DateInterval(start: first.window.start, end: second.window.end)
+        }
+        return Night(segments: segments, window: window,
+                     strapScore: second.window.duration > first.window.duration ? second.strapScore : first.strapScore,
+                     recordedTimeZone: first.recordedTimeZone ?? second.recordedTimeZone)
     }
 
     /// Decision 70h (#311, #312): the shapes a build before decisions 70b and 70e gave the strap night

@@ -2680,7 +2680,8 @@ final class HealthKitWriter {
     ///
     /// `alsoWrittenAs`: other shapes of the same night whose signature also means "Health already holds
     /// it" (decision 70h: a strap night written before its `.inBed` layer and inclusive stage end is
-    /// not rewritten for those alone). Empty for the ring, so a ring night is judged exactly as before.
+    /// not rewritten for those alone), unless the night extends the written span (decision 70k). Empty
+    /// for the ring, so a ring night is judged exactly as before.
     func mirrorSettledNight(local: LocalStore, segments: [SleepSegment],
                             alsoWrittenAs: [[SleepSegment]] = []) async -> MirrorOutcome {
         guard let start = segments.map(\.start).min(),
@@ -2740,8 +2741,13 @@ final class HealthKitWriter {
         // Health already reflects this exact staging — nothing to do (the common steady-state).
         if last?.signature == signature { return .unchanged }
         // Decision 70h (#311, #312): forward-only. The written night differs from this one only by the
-        // strap's `.inBed` layer and/or its inclusive stage end, so Health keeps what it has.
-        if let last, alsoWrittenAs.contains(where: { Self.sleepSignature($0) == last.signature }) { return .unchanged }
+        // strap's `.inBed` layer and/or its inclusive stage end, so Health keeps what it has. Decision
+        // 70k: never for a night that EXTENDS the written span (58b's `strapNightExtends`), whatever
+        // extended it (stages or the in-bed span): that one is rewritten once, as 58b admitted it.
+        if let last, !alsoWrittenAs.isEmpty,
+           !LocalStore.strapNightExtends(DateInterval(start: start, end: end),
+                                         written: DateInterval(start: last.spanStart, end: max(last.spanStart, last.spanEnd))),
+           alsoWrittenAs.contains(where: { Self.sleepSignature($0) == last.signature }) { return .unchanged }
 
         // 1. WRITE the current staging FIRST. A throw here leaves the prior night intact → no loss.
         let fresh: [String]
