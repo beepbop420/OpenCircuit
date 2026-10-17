@@ -242,10 +242,12 @@ public enum HelioSleepSelection {
 
     /// One night the strap staged.
     public struct Night: Equatable {
-        /// Stage segments, oldest first, never overlapping. No `.inBed` segment: the strap's record
-        /// has no separate in-bed span (ZEPP_PROTOCOL.md §6.6 🔴), so none is invented.
+        /// Per session, oldest first: one `.inBed` segment over the session's in-bed span (decision 70b,
+        /// `inBedSpan`), then its stage segments, which never overlap each other. The `.inBed` layer
+        /// overlaps the stages, as on the ring's nights; a stitched night carries one per session
+        /// (fragment), and the gap between fragments is covered by no segment at all.
         public let segments: [SleepSegment]
-        /// First segment start … last segment end.
+        /// The union of the sessions' in-bed spans: the first `.inBed` start … the last `.inBed` end.
         public let window: DateInterval
         /// The strap's own sleep score, kept for display. Not OpenCircuit's composite score.
         public let strapScore: UInt8
@@ -305,10 +307,13 @@ public enum HelioSleepSelection {
 
     /// The night one sleep-session record describes, or nil when it has no usable staging.
     ///
-    /// Each stage's own start and end are used (§6.6: "use both and flag gaps"): a gap between
-    /// stages stays a gap, never filled in. A stage that starts before the previous one ends is
-    /// trimmed to start where the previous ended, so no two segments overlap. nil when nothing
-    /// survives, when the night is longer than `maxNightLength`, or when it ends in the future.
+    /// Each stage's own start and end are used (§6.6: "use both and flag gaps"), the end being one
+    /// minute after its inclusive end minute (`ZeppSleepSession.Stage.segmentEnd`, decision 70e): a
+    /// gap between stages stays a gap, never filled in. A stage that starts before the previous one
+    /// ends is trimmed to start where the previous ended, so no two stage segments overlap. The
+    /// stages are preceded by one `.inBed` segment over the session's in-bed span (`inBedSpan`,
+    /// decisions 70a/70b), which is also the window. nil when nothing survives, when the stages span
+    /// more than `maxNightLength`, or when the night ends in the future.
     public static func night(from session: ZeppSleepSession, now: Date) -> Night? {
         var segments: [SleepSegment] = []
         var previousEnd = Date.distantPast
@@ -369,13 +374,41 @@ public enum HelioSleepSelection {
         return out
     }
 
-    /// Two sessions as one night: both segment lists as reported, the window spanning both, the
-    /// longer session's score and the first's recorded zone.
+    /// Two sessions as one night: both segment lists as reported (each with its own `.inBed` segment,
+    /// decision 70b), the window spanning both, the longer session's score and the first's recorded zone.
     static func stitched(_ first: Night, _ second: Night) -> Night {
         Night(segments: first.segments + second.segments,
               window: DateInterval(start: first.window.start, end: second.window.end),
               strapScore: second.window.duration > first.window.duration ? second.strapScore : first.strapScore,
               recordedTimeZone: first.recordedTimeZone ?? second.recordedTimeZone)
+    }
+
+    /// Decision 70h (#311, #312): the shapes a build before decisions 70b and 70e gave the strap night
+    /// `segments` now describe, for the Health mirror to recognise a night it already holds. Forward-only
+    /// (70c): a night already written is not rewritten when its only differences from the written night
+    /// are the `.inBed` layer and/or the stage end's extra minute.
+    ///
+    /// Three shapes, all without the `.inBed` layer: the stages as they are (the layer alone differs);
+    /// every stage a minute shorter (an inclusive-end record, the format observed, §6.6 🟡: the stages
+    /// were contiguous, so each start is unchanged); and every stage a minute shorter with a start that
+    /// met the previous stage's end a minute earlier too (a record that already ended a stage at the
+    /// next start, where the overlap trim moved that start). A stage that would have no length was
+    /// never written, so it is left out. Empty when there are no stages.
+    public static func shapesBeforeInBedAndInclusiveEnd(_ segments: [SleepSegment]) -> [[SleepSegment]] {
+        let stages = segments.filter { $0.stage != .inBed }
+        guard !stages.isEmpty else { return [] }
+        let minute = ZeppSleepSession.stageEndMinute
+        var shortened: [SleepSegment] = []
+        var trimmed: [SleepSegment] = []
+        var previousEnd: Date?
+        for stage in stages {
+            let end = stage.end.addingTimeInterval(-minute)
+            if end > stage.start { shortened.append(SleepSegment(start: stage.start, end: end, stage: stage.stage)) }
+            let start = stage.start == previousEnd ? stage.start.addingTimeInterval(-minute) : stage.start
+            if end > start { trimmed.append(SleepSegment(start: start, end: end, stage: stage.stage)) }
+            previousEnd = stage.end
+        }
+        return [stages, shortened, trimmed]
     }
 
     /// The nights that may be stored or written: decision 13's "never overwrite a manually edited

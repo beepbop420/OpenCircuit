@@ -704,8 +704,8 @@ struct SleepCardView: View {
     /// for days, PROTOCOL §3.)
     ///
     /// RING NIGHTS ONLY (#257). Every cause above, and every lever `captureHint` names, is the ring's
-    /// hand-off. A strap night's in-bed start is the strap's own staged sleep start
-    /// (`HelioSleepSelection`), not a resume pointer, so a short strap night is not evidence of a
+    /// hand-off. A strap night's in-bed start is the strap's own record's sleep start
+    /// (`HelioSleepSelection.inBedSpan`, decision 70a), not a resume pointer, so a short strap night is not evidence of a
     /// truncated transfer and must not tell its wearer to close the RingConn app.
     private func isLikelyTruncated(_ night: Night) -> Bool {
         guard recordingDevice(night) == .ringConn else { return false }

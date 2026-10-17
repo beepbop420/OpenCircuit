@@ -1,6 +1,7 @@
 import Foundation
 import HealthKit
 import OpenCircuitKit
+import ZeppKit
 
 // Writes ring metrics into Apple Health. Type/unit choices follow
 // docs/HEALTHKIT_MAPPING.md. Samples are saved with the device's own timestamps
@@ -562,10 +563,12 @@ final class HealthKitWriter {
         }
         // The Helio Strap's staged nights (#215, decision 13), each through the same settled-night
         // mirror and quiet margin as the ring's; `mirrorSettledNight` leaves an edited night alone
-        // and is a no-op for a night Health already holds (signature match).
+        // and is a no-op for a night Health already holds (signature match), including one written
+        // before the `.inBed` layer and the inclusive stage end (decision 70h, forward-only).
         for night in strapNights where SleepHealthGate.isReadyToWrite(
             latestSegmentEnd: night.map(\.end).max(), now: Date(), finalized: strapNightsFinalized) {
-            switch await mirrorSettledNight(local: store, segments: night) {
+            switch await mirrorSettledNight(local: store, segments: night,
+                                            alsoWrittenAs: HelioSleepSelection.shapesBeforeInBedAndInclusiveEnd(night)) {
             case .wrote(let count):
                 result.sleepSegments += count
                 writtenKinds.insert(.sleep)
@@ -2666,7 +2669,12 @@ final class HealthKitWriter {
     /// Health) to avoid per-flush rewrite churn; the leftover duplicate — de-overlapped by Health in the
     /// "time asleep" total — is cleared by the next re-stage's union delete. Assumes the Health-write
     /// gate (`Self.isFlushing`) is HELD by the caller.
-    func mirrorSettledNight(local: LocalStore, segments: [SleepSegment]) async -> MirrorOutcome {
+    ///
+    /// `alsoWrittenAs`: other shapes of the same night whose signature also means "Health already holds
+    /// it" (decision 70h: a strap night written before its `.inBed` layer and inclusive stage end is
+    /// not rewritten for those alone). Empty for the ring, so a ring night is judged exactly as before.
+    func mirrorSettledNight(local: LocalStore, segments: [SleepSegment],
+                            alsoWrittenAs: [[SleepSegment]] = []) async -> MirrorOutcome {
         guard let start = segments.map(\.start).min(),
               let end = segments.map(\.end).max(), end > start else { return .unchanged }
         // Resolve the night by in-bed overlap so the key matches the card's summary across midnight;
@@ -2723,6 +2731,9 @@ final class HealthKitWriter {
         let last = local.mirroredNight(night: night)
         // Health already reflects this exact staging — nothing to do (the common steady-state).
         if last?.signature == signature { return .unchanged }
+        // Decision 70h (#311, #312): forward-only. The written night differs from this one only by the
+        // strap's `.inBed` layer and/or its inclusive stage end, so Health keeps what it has.
+        if let last, alsoWrittenAs.contains(where: { Self.sleepSignature($0) == last.signature }) { return .unchanged }
 
         // 1. WRITE the current staging FIRST. A throw here leaves the prior night intact → no loss.
         let fresh: [String]
