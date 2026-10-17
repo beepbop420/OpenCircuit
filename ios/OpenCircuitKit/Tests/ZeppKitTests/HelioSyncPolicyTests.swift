@@ -36,7 +36,8 @@ private func sessionRecord(midnightRef: TimeInterval = midnight, stages: [(start
     r[0x016] = score
     r[0x054] = UInt8(stages.count)
     for (i, s) in stages.enumerated() {
-        put(le16(s.start) + le16(s.end) + [s.type], at: 0x056 + 5 * i)
+        // §6.6 (decision 70e): a stage's end minute is inclusive, so a stage ending at `end` is written as `end − 1`.
+        put(le16(s.start) + le16(s.end - 1) + [s.type], at: 0x056 + 5 * i)
     }
     return r
 }
@@ -216,6 +217,7 @@ final class HelioSleepSelectionTests: XCTestCase {
         ])])
         let night = try XCTUnwrap(HelioSleepSelection.night(from: sessions[0], now: now))
         XCTAssertEqual(night.segments, [
+            SleepSegment(start: sessionTime(1380), end: sessionTime(1530), stage: .inBed),
             SleepSegment(start: sessionTime(1380), end: sessionTime(1410), stage: .asleepCore),
             SleepSegment(start: sessionTime(1410), end: sessionTime(1470), stage: .asleepDeep),
             SleepSegment(start: sessionTime(1470), end: sessionTime(1500), stage: .asleepREM),
@@ -224,7 +226,9 @@ final class HelioSleepSelectionTests: XCTestCase {
         ])
         XCTAssertEqual(night.window, DateInterval(start: sessionTime(1380), end: sessionTime(1530)))
         XCTAssertEqual(night.strapScore, 80)
-        XCTAssertFalse(night.segments.contains { $0.stage == .inBed }, "no in-bed span is invented")
+        XCTAssertEqual(night.segments.filter { $0.stage == .inBed },
+                       [SleepSegment(start: sessionTime(1380), end: sessionTime(1530), stage: .inBed)],
+                       "the record's own in-bed span; no in-bed span is invented")
         XCTAssertTrue(night.segments.allSatisfy { $0.provenance == .measured })
     }
 
@@ -236,6 +240,7 @@ final class HelioSleepSelectionTests: XCTestCase {
         ])])
         let night = try XCTUnwrap(HelioSleepSelection.night(from: sessions[0], now: now))
         XCTAssertEqual(night.segments, [
+            SleepSegment(start: sessionTime(1380), end: sessionTime(1500), stage: .inBed),
             SleepSegment(start: sessionTime(1380), end: sessionTime(1420), stage: .asleepCore),
             SleepSegment(start: sessionTime(1420), end: sessionTime(1440), stage: .asleepDeep),
             SleepSegment(start: sessionTime(1450), end: sessionTime(1500), stage: .asleepCore),
@@ -267,8 +272,8 @@ final class HelioSleepSelectionTests: XCTestCase {
         let nights = HelioSleepSelection.nights(from: try parseSessions([first, second]), now: now)
         XCTAssertEqual(nights.count, 1)
         XCTAssertEqual(nights[0].window, DateInterval(start: sessionTime(1380), end: sessionTime(1860)))
-        XCTAssertEqual(nights[0].segments.map(\.start), [1380, 1500, 1650, 1740].map { sessionTime($0) })
-        XCTAssertEqual(nights[0].segments.map(\.end), [1500, 1620, 1740, 1860].map { sessionTime($0) },
+        XCTAssertEqual(nights[0].segments.map(\.start), [1380, 1380, 1500, 1650, 1650, 1740].map { sessionTime($0) })
+        XCTAssertEqual(nights[0].segments.map(\.end), [1620, 1500, 1620, 1860, 1740, 1860].map { sessionTime($0) },
                        "no segment invented for the 30-minute gap")
         XCTAssertEqual(SleepStaging.summary(nights[0].segments).minutes.asleep, 450)
 
@@ -440,7 +445,7 @@ final class HelioNapRuleTests: XCTestCase {
         let split = HelioSleepSelection.naps(from: sleeps, mainSleeps: [], now: now)
         XCTAssertEqual(split.mainSleeps.map(\.window), [DateInterval(start: sessionTime(1380), end: sessionTime(1860))])
         XCTAssertEqual(split.naps.map(\.window), [DateInterval(start: sessionTime(2280), end: sessionTime(2340))])
-        XCTAssertEqual(split.naps.first?.segments.map(\.stage), [.asleepCore, .asleepDeep])
+        XCTAssertEqual(split.naps.first?.segments.map(\.stage), [.inBed, .asleepCore, .asleepDeep])
     }
 }
 

@@ -174,7 +174,7 @@ final class RecordParserTests: XCTestCase {
         XCTAssertEqual(s.stages.map(\.kind), [.awake, .light, .deep, .rem, .other(0x02)])
         XCTAssertEqual(s.stages[1].start, date(base + 1400 * 60))
         XCTAssertEqual(s.stages[1].end, date(base + 1500 * 60))
-        XCTAssertEqual(s.stageGaps, [date(base + 1500 * 60)...date(base + 1510 * 60)])
+        XCTAssertEqual(s.stageGaps, [date(base + 1501 * 60)...date(base + 1510 * 60)])
         XCTAssertEqual([s.totalREMMinutes, s.totalLightMinutes, s.totalDeepMinutes, s.totalAwakeMinutes], [95, 250, 110, 25])
         XCTAssertEqual(parsed.lastRecordTime, date(1_790_650_000))
     }
