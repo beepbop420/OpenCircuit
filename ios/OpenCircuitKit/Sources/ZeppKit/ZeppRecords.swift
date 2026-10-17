@@ -277,11 +277,21 @@ public struct ZeppSleepSession: Equatable {
 
     public struct Stage: Equatable {
         public let start: Date
+        /// The end minute as the record states it (`rawEndMinute`). It is INCLUSIVE (§6.6 🟡): the
+        /// stage covers that minute too, so the time it covers ends at `segmentEnd`.
         public let end: Date
         public let kind: StageKind
         public let rawStartMinute: UInt16
         public let rawEndMinute: UInt16
+
+        /// Where the stage's time ends: one minute after its inclusive end minute (§6.6 🟡, decision
+        /// 70e, #312). The one place ZeppKit turns a stage end into a span end; every reader of a
+        /// stage's span (`stageGaps`, `HelioSleepSelection.night(from:now:)`) uses this, never `end`.
+        public var segmentEnd: Date { end.addingTimeInterval(ZeppSleepSession.stageEndMinute) }
     }
+
+    /// The inclusive end minute's own length (§6.6 🟡, decision 70e).
+    public static let stageEndMinute: TimeInterval = 60
 
     public let time: Date
     /// Local midnight (as Unix seconds) of the day the session belongs to.
@@ -300,11 +310,13 @@ public struct ZeppSleepSession: Equatable {
     public let totalDeepMinutes: UInt16
     public let totalAwakeMinutes: UInt16
 
-    /// Spans between consecutive stages that no stage covers (§6.6: use stage ends, flag gaps).
+    /// Spans between consecutive stages that no stage covers (§6.6: use stage ends, flag gaps). A
+    /// stage covers its inclusive end minute (`Stage.segmentEnd`), so a next stage starting the minute
+    /// after a stage's end minute leaves no gap.
     public var stageGaps: [ClosedRange<Date>] {
         var out = [ClosedRange<Date>]()
-        for (previous, next) in zip(stages, stages.dropFirst()) where next.start > previous.end {
-            out.append(previous.end...next.start)
+        for (previous, next) in zip(stages, stages.dropFirst()) where next.start > previous.segmentEnd {
+            out.append(previous.segmentEnd...next.start)
         }
         return out
     }

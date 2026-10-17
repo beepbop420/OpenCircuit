@@ -314,9 +314,9 @@ public enum HelioSleepSelection {
         var previousEnd = Date.distantPast
         for stage in session.stages.sorted(by: { $0.start < $1.start }) {
             let start = max(stage.start, previousEnd)
-            guard stage.end > start else { continue }
-            segments.append(SleepSegment(start: start, end: stage.end, stage: Self.stage(for: stage.kind)))
-            previousEnd = stage.end
+            guard stage.segmentEnd > start else { continue }
+            segments.append(SleepSegment(start: start, end: stage.segmentEnd, stage: Self.stage(for: stage.kind)))
+            previousEnd = stage.segmentEnd
         }
         guard let first = segments.first?.start, let last = segments.last?.end, last > first else { return nil }
         let stageSpan = DateInterval(start: first, end: last)
