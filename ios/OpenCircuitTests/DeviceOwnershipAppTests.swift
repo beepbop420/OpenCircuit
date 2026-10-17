@@ -1076,8 +1076,8 @@ final class DeviceOwnershipAppTests: XCTestCase {
         let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
         XCTAssertEqual(rows.map(\.asleepMin), [450])
         let segments = SleepHypnogramCodec.decode(try XCTUnwrap(rows.first).hypnogramData)
-        XCTAssertEqual(segments.map(\.start), [localHour(-1), localHour(3.5)], "both halves, as reported")
-        XCTAssertEqual(segments.map(\.end), [localHour(3), localHour(7)], "the gap stays a gap")
+        XCTAssertEqual(segments.map(\.start), [localHour(-1), localHour(-1), localHour(3.5), localHour(3.5)], "both halves, as reported")
+        XCTAssertEqual(segments.map(\.end), [localHour(3), localHour(3), localHour(7), localHour(7)], "the gap stays a gap")
     }
 
     /// The `evening-then-night` probe's exact shape, a doze ending 60 minutes before the night: within
@@ -1181,7 +1181,7 @@ extension DeviceOwnershipAppTests {
         XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"])
         XCTAssertEqual(try napRows(store), ["14.0…15.0 asleep=60"])
         let nap = try XCTUnwrap(try store.context.fetch(FetchDescriptor<StoredNap>()).first)
-        XCTAssertEqual(nap.stagedSegments?.map(\.stage), [.asleepCore, .asleepDeep], "the strap's own stages")
+        XCTAssertEqual(nap.stagedSegments?.map(\.stage), [.inBed, .asleepCore, .asleepDeep], "the strap's own stages")
         XCTAssertFalse(nap.isManuallyAdded || nap.isManuallyEdited)
         XCTAssertEqual(try store.pendingNaps().map(\.start), [localHour(14)], "offered to Apple Health")
         XCTAssertEqual(try store.naps(on: localHour(14)).map(\.start), [localHour(14)], "the Sleep card's nap list")
