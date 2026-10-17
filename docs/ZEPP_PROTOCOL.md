@@ -787,6 +787,31 @@ sleep. The stage table fits at most 100 entries before `0x24A` (🔴 inference).
 uses each stage's start and the session end, ignoring stage end fields (🟡); OpenCircuit
 should use both and flag gaps.
 
+**Stage end minutes are inclusive, and the record's span is the stages' span.** 🟡 One fetched
+record (owner's strap, fw 3.25.0.3, HelioVerify, CRC ok; decisions 70 and 70e, #311 and #312):
+- the first stage starts at the record's sleep start (`0x00A`);
+- every next stage starts at the previous stage's end minute + 1, and the last stage's end
+  minute + 1 is the record's sleep end (`0x00C`). So a stage covers its end minute: its span
+  ends at **end minute + 1 minute**;
+- the per-stage minutes counted that way equal the record's four totals (`0x24A`–`0x250`)
+  exactly, and the four totals sum to sleep start → sleep end. Read as exclusive, every total
+  comes up short by its stage count and a 1-minute gap opens between consecutive stages (about
+  5% of that night).
+
+Synthetic example (not from the record): sleep start 1380 (23:00), sleep end 1860 (07:00);
+stages `1380–1499` light, `1500–1559` deep, `1560–1619` REM, `1620–1859` light. Spans:
+23:00–01:00, 01:00–02:00, 02:00–03:00, 03:00–07:00, with no gaps; totals REM 60, light 360,
+deep 60, awake 0, summing to 480 = 1860 − 1380.
+
+OpenCircuit: `ZeppSleepSession.Stage.segmentEnd` (end minute + 1 minute) is the one place
+ZeppKit turns a stage end into a span end. The overlap trim stays, so a record that already
+ends a stage at the next start can't produce an overlap. The record shows no lead-in (sleep
+start = first stage start), so the record's span is the in-bed envelope: a session's In Bed span
+is the union of its stage span and its record span when the record span is valid (it starts
+before it ends, overlaps the stage span, and the union is at most 20 h), else the stage span
+(`HelioSleepSelection.inBedSpan`). No lead-in is estimated. Promote to 🟢 after more nights
+show the same shape.
+
 ---
 
 ## 7. Live data
