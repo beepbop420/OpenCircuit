@@ -319,11 +319,24 @@ public enum HelioSleepSelection {
             previousEnd = stage.end
         }
         guard let first = segments.first?.start, let last = segments.last?.end, last > first else { return nil }
-        let window = DateInterval(start: first, end: last)
-        guard window.duration <= maxNightLength, last <= now.addingTimeInterval(3600) else { return nil }
+        let stageSpan = DateInterval(start: first, end: last)
+        guard stageSpan.duration <= maxNightLength else { return nil }
+        let window = inBedSpan(stageSpan: stageSpan, recordStart: session.sleepStart, recordEnd: session.sleepEnd)
+        guard window.end <= now.addingTimeInterval(3600) else { return nil }
         guard segments.contains(where: { $0.stage != .awake }) else { return nil }
+        segments.insert(SleepSegment(start: window.start, end: window.end, stage: .inBed), at: 0)
         return Night(segments: segments, window: window, strapScore: session.score,
                      recordedTimeZone: recordedTimeZone(midnight: session.midnightReference))
+    }
+
+    /// Decision 70a (#311): a session's in-bed span. The union of its stage span and its record span
+    /// (`ZeppSleepSession.sleepStart` … `sleepEnd`) when the record span is valid: it starts before it
+    /// ends, it overlaps the stage span, and the union is no longer than `maxNightLength`. Otherwise
+    /// the stage span. No lead-in is estimated.
+    public static func inBedSpan(stageSpan: DateInterval, recordStart: Date, recordEnd: Date) -> DateInterval {
+        guard recordStart < recordEnd, recordStart < stageSpan.end, stageSpan.start < recordEnd else { return stageSpan }
+        let union = DateInterval(start: min(stageSpan.start, recordStart), end: max(stageSpan.end, recordEnd))
+        return union.duration <= maxNightLength ? union : stageSpan
     }
 
     /// Decision 28f (review-224d S-3): consecutive sessions this far apart or closer are one night.
