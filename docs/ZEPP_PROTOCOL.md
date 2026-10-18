@@ -2443,7 +2443,10 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   night joined so far, as long as the joined night is no longer than 20 h. Neither part of such a
   night is a nap, and the awake gap between them stays a gap (no segment is written for it). Known
   gap kept: a first part that ends before midnight, more than 60 min before the rest, is no
-  overnight sleep and is not joined.
+  overnight sleep and is not joined. Second known gap (71h): a night an earlier build split as
+  "earlier part = strap nap, later, longer part = the night already in Apple Health" stays split
+  after the update, because the joined night ends where the written night ends and so doesn't
+  extend it. Nothing is counted twice or lost, and the current stitch never makes that split.
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
@@ -2494,4 +2497,5 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   sessions, the phone-side nap rule; capture item 29.
 - 2026-10-03: §21.6, what the app implements of §21.5 for strap naps (#231). No tag was promoted.
 - 2026-10-18: §21.5 step 3 and §21.6: OpenCircuit joins the overnight sleeps of one night whatever the gap
-  (decision 71, #278); the 60-min rule stays for every other sleep. No tag was promoted.
+  (decision 71, #278); the 60-min rule stays for every other sleep; the 71h known gap. No tag was
+  promoted.

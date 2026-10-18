@@ -407,10 +407,14 @@ final class HelioStoreSink: HelioHistorySink {
             // (`mirrorSettledNight`: write first, then delete the old span, nap-safe), behind the same
             // settle margin. Anything else is kept out, so Health gets no second write of it and
             // nothing written is silently replaced or shortened. A night not yet written still
-            // stitches. The later session is not stored as a row of its own: it is 60 min or less
+            // stitches. A stitched session is not stored as a row of its own: it is 60 min or less
             // from the night, or an overnight sleep of the night's own key (71c), so it is part of the
-            // main sleep, never a nap (#231, `storeNaps` never sees it). A joined night overlaps the
-            // written first part and ends later, so it is an extension like any other (71e).
+            // main sleep, never a nap (#231, `storeNaps` never sees it). A night joined over a later
+            // part overlaps the written first part and ends later, so it is an extension like any
+            // other (71e). One joined over an EARLIER part ends where the written night ends, so it is
+            // no extension and is kept out: a night an earlier build split as "earlier part = strap
+            // nap, later part = the night in Health" stays split, nothing counted twice (71h, a known
+            // gap; this build's own stitch never makes that split).
             var extending: DateInterval?
             if let written = store.writtenNightSpan(for: night),
                abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
@@ -450,8 +454,9 @@ final class HelioStoreSink: HelioHistorySink {
 
     /// The outcomes that mean another night holds the sleep's key, so the sleep itself is no night: the
     /// longer part of its own night (review-224e S-2; since decision 71b only when joining the two would
-    /// exceed `maxNightLength`), the other device's night (28a), or a night the key already names (28d). Any other outcome (stored, kept as edited, deferred, failed) leaves the
-    /// sleep a night, never a nap.
+    /// exceed `maxNightLength`), the other device's night (28a), or a night the key already names
+    /// (28d). Any other outcome (stored, kept as edited, deferred, failed) leaves the sleep a night,
+    /// never a nap.
     private static let nightKeptOut: Set<SleepPersistOutcome> = [.keptFullerStoredNight, .ownedByOtherDevice, .refusedNightKeyCollision]
 
     /// #231 (ZEPP_PROTOCOL.md §21.5): store the strap's naps among `sleeps` (the sync's own stitched

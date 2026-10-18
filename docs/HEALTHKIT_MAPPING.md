@@ -119,7 +119,10 @@ stores and writes what it measured for time it owned:
     A night not yet written still stitches. A night joined over a long awakening (71b) overlaps its
     written first part and ends later, so it is an extension like any other; its store prunes an
     auto nap an earlier build kept for the later part, so the rewrite's union delete clears that
-    nap's samples too (71e);
+    nap's samples too (71e). Known gap (71h): a night an earlier build split as "earlier part =
+    strap nap, later, longer part = the night already in Health" stays split after the update. The
+    joined night ends where the written night ends, so it is no extension and is kept out; nothing
+    is counted twice or lost, and this build's own stitch never makes that split;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
