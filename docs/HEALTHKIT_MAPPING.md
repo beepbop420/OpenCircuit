@@ -129,8 +129,8 @@ stores and writes what it measured for time it owned:
     or longer, with up to 5 non-sleep minutes inside it as an awake gap, is an activity sleep block
     (`HelioSleepSelection.activityBlocks`): one `.inBed` over it, its minutes as generic-asleep
     stages, no strap score. It is stitched like a session (per-block ownership first, then 28f/71b)
-    and is used ONLY when it joins a night that holds a session record and lies entirely after the
-    in-bed end of one of that night's sessions (no lead-in, 73f). A block never costs a night (73g):
+    and is used ONLY when it joins a night that holds a session record and starts at or after the
+    in-bed end of that night's LAST session (no lead-in, nothing between records: 73f, 73i). A block never costs a night (73g):
     if the night it would make fails the overnight gates or is longer than 20 h while the sessions
     alone make an overnight sleep, the sessions' night is kept and the block counted alone; one that would stand alone
     (a daytime sleep, an evening doze, a night with no record) is stored as nothing, neither night
