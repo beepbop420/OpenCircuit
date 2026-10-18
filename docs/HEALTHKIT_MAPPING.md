@@ -123,6 +123,23 @@ stores and writes what it measured for time it owned:
     strap nap, later, longer part = the night already in Health" stays split after the update. The
     joined night ends where the written night ends, so it is no extension and is kept out; nothing
     is counted twice or lost, and this build's own stitch never makes that split;
+  - a later sleep the strap marks only per minute (decision 73, #278): the strap writes one `0x48`
+    record per night, and a sleep after a long awakening can be left only in the activity minutes,
+    as kind sleep (`0x78`). A run of those minutes outside every staged session's in-bed span, 20 min
+    or longer, with up to 5 non-sleep minutes inside it as an awake gap, is an activity sleep block
+    (`HelioSleepSelection.activityBlocks`): one `.inBed` over it, its minutes as generic-asleep
+    stages, no strap score. It is stitched like a session (per-block ownership first, then 28f/71b)
+    and is used ONLY when it joins a night that holds a session record and starts at or after the
+    in-bed end of that night's LAST session (no lead-in, nothing between records: 73f, 73i). A block never costs a night (73g):
+    if the night it would make fails the overnight gates or is longer than 20 h while the sessions
+    alone make an overnight sleep, the sessions' night is kept and the block counted alone; one that would stand alone
+    (a daytime sleep, an evening doze, a night with no record) is stored as nothing, neither night
+    nor nap, and only counted in the sleep-round diagnostics line. A block whose last sleep minute
+    is less than 20 min before the sync's newest activity minute may still be going on and waits
+    for the next sync. No new write path: the joined night overlaps the written night and ends
+    later, so it is a 58b extension, rewritten once (write first, union delete), and a night not
+    yet written is written once after its settle margin. Without activity minutes (that round
+    failed or ran out of time) nothing changes;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;

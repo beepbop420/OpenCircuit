@@ -2350,3 +2350,423 @@ extension StrapNightHealthTests {
         }
     }
 }
+
+// MARK: - Decision 73 (#278): a later sleep the strap marks only per minute joins its night
+//
+// The strap writes one session record per night: sleep A (23:00–02:00). The later sleep after a long
+// awakening (05:30–07:00) is in no record, only in the activity minutes, as kind sleep (`0x78`). Those
+// minutes are a block (73a/73b) that joins A's night (71b) like a second session would, so the result
+// is the night decision 71 already stores and writes (`assertTheJoinedNightIsStored`). A block that
+// would stand alone is used nowhere (73c). Every minute here is synthetic.
+
+/// Activity minute kinds (§6.5): asleep, and an ordinary kind for the minutes up.
+private let asleepKind = ZeppActivityMinute.kindSleep, upKind: UInt8 = 0x01
+
+/// The night's activity minutes as the strap marks them, to `until`: asleep in A (23:00–02:00, inside
+/// A's record, so never a block), up 02:00–05:30, asleep 05:30–07:00, up after.
+private func nightActivity(until: Double) -> [(Double, Double, UInt8)] {
+    [(-1, 2, asleepKind), (2, 5.5, upKind), (5.5, 7, asleepKind), (7, until, upKind)].filter { $0.0 < until }
+        .map { ($0.0, min($0.1, until), $0.2) }
+}
+
+extension StrapNightHealthTests {
+    /// One strap sync at `now` delivering each of `sessions` as its own session record and the activity
+    /// minutes `activity` (contiguous spans of local hours, each one kind), through the production path.
+    /// `temperatureFrom`: skin temperature minutes from that local hour to `now`.
+    private func syncWithActivity(_ sessions: [[(Double, Double, UInt8)]], activity: [(Double, Double, UInt8)],
+                                  temperatureFrom: Double? = nil, at now: Date, store: LocalStore) throws -> HelioSyncResult {
+        clock = now
+        let device = makeStrap(sessions[0])
+        device.fetchData[.sleepSession] = (stamp(hour(0).timeIntervalSince1970 - 86_400), sessions.flatMap(session))
+        if let temperatureFrom {
+            let count = Int((now.timeIntervalSince(hour(temperatureFrom)) / 60).rounded())
+            device.fetchData[.temperature] = (stamp(hour(temperatureFrom).timeIntervalSince1970), temperatureMinutes(count, centi: 3350))
+        }
+        if let first = activity.first {
+            let bytes = activity.flatMap { span in
+                (0..<Int(((span.1 - span.0) * 60).rounded())).flatMap { _ in [span.2, 0x08, 0, 55, 0, 0, 0, 0] as [UInt8] }
+            }
+            device.fetchData[.activity] = (stamp(hour(first.0).timeIntervalSince1970), bytes)
+        }
+        let transport = Transport(device: device)
+        let keys = Keys()
+        let helio = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
+                                 sink: HelioStoreSink(store: store, observability: observability), findState: HelioFindState(),
+                                 clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
+        transport.session = helio
+        helio.start()
+        transport.drain()
+        let result = try XCTUnwrap(helio.lastSyncResult)
+        XCTAssertEqual(result.interrupted, false)
+        return result
+    }
+
+    private var sleepAWindow: DateInterval { DateInterval(start: hour(-1), end: hour(2)) }
+
+    /// The owner's shape: A was stored at 02:15 and is in Health. The morning sync carries the same
+    /// record and the night's activity minutes: one joined night, stored in A's row, rewritten once as
+    /// an extension (58b) whose union delete covers A's old span, so nothing is counted twice. A later
+    /// sync with the same data writes nothing.
+    func testALaterSleepInTheActivityMinutesExtendsTheNightAlreadyInHealth() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let first = try syncWithActivity([sleepA], activity: nightActivity(until: 2.25), at: hour(2.25), store: store)
+            XCTAssertEqual(first.nights.map(\.window), [sleepAWindow])
+            let firstPart = try recordWrite(try storedHypnogram(store), store: store)
+            let key = try XCTUnwrap(try rows(store).first).night
+
+            let morning = try syncWithActivity([sleepA], activity: nightActivity(until: 8), at: hour(8), store: store)
+            XCTAssertEqual(morning.nights.map(\.window), [joinedNight], "stored and handed to the flush")
+            try assertTheJoinedNightIsStored(store)
+            XCTAssertEqual(try XCTUnwrap(try rows(store).first).night, key, "in A's row")
+            XCTAssertEqual(morning.sleepRound?.activityBlocksJoined, 1)
+            XCTAssertEqual(morning.sleepRound?.activityBlocksAlone, 0)
+
+            let written = try await strapFlush(morning.nights.map(\.segments), at: hour(8), store: store)
+            XCTAssertEqual(written, [joinedNight], "rewritten once, as an extension")
+            let record = try XCTUnwrap(store.mirroredNight(night: key))
+            XCTAssertEqual(record.signature, HealthKitWriter.sleepSignature(try storedHypnogram(store)))
+            let deleted = DateInterval(start: record.spanStart, end: record.spanEnd)
+            XCTAssertEqual(deleted, joinedNight)
+            XCTAssertTrue(deleted.start <= firstPart.start && firstPart.end <= deleted.end, "A's old samples are inside the union delete")
+            XCTAssertEqual(store.healthWrittenNapWindows(overlapping: deleted.start, to: deleted.end), [])
+            XCTAssertEqual(extensionBreadcrumbs().count, 1)
+
+            let again = try syncWithActivity([sleepA], activity: nightActivity(until: 9), at: hour(9), store: store)
+            let rewritten = try await strapFlush(again.nights.map(\.segments), at: hour(9), store: store)
+            XCTAssertEqual(rewritten, [], "the signature no-op")
+            XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(13)), [])
+            try assertTheJoinedNightIsStored(store)
+            XCTAssertEqual(extensionBreadcrumbs().count, 1)
+        }
+    }
+
+    /// Before A is written (it arrives with the block on the morning sync, or was stored at 02:15 inside
+    /// its margin and never written): one joined night, written once, no extension.
+    func testALaterSleepInTheActivityMinutesIsWrittenOnceWithItsNightWhenNothingWasWrittenBefore() async throws {
+        for firstPartStoredFirst in [false, true] {
+            try await inFixedZone {
+                let label = "first part stored first: \(firstPartStoredFirst)"
+                ownership.install(.strapOwnsAllTime)
+                let crumbs = extensionBreadcrumbs().count
+                let store = try makeStore()
+                var written: [DateInterval] = []
+                if firstPartStoredFirst {
+                    let first = try syncWithActivity([sleepA], activity: nightActivity(until: 2.25), at: hour(2.25), store: store)
+                    written += try await strapFlush(first.nights.map(\.segments), at: hour(2.25), store: store)
+                }
+                let morning = try syncWithActivity([sleepA], activity: nightActivity(until: 7.5), at: hour(7.5), store: store)
+                XCTAssertEqual(morning.nights.map(\.window), [joinedNight], label)
+                try assertTheJoinedNightIsStored(store, label)
+                written += try await strapFlush(morning.nights.map(\.segments), at: hour(7.5), store: store)
+                written += try await strapFlush(morning.nights.map(\.segments), at: hour(8), store: store)
+                written += try await strapFlush([], at: hour(12), store: store)
+                XCTAssertEqual(written, [joinedNight], "\(label): written once")
+                XCTAssertEqual(try mirrorSpan(store), joinedNight, label)
+                XCTAssertEqual(extensionBreadcrumbs().count, crumbs, "\(label): nothing was written early, so nothing extended")
+            }
+        }
+    }
+
+    /// Decision 73d: at 07:05 the strap still marks the wearer asleep up to its newest minute, so the
+    /// block is not used: the night stays A as written, and nothing is written or stored for the block.
+    /// The next sync, after it has ended, joins it and rewrites the night once.
+    func testABlockStillInProgressIsNotUsedUntilTheNextSyncAfterItEnded() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            _ = try syncWithActivity([sleepA], activity: nightActivity(until: 2.25), at: hour(2.25), store: store)
+            try recordWrite(try storedHypnogram(store), store: store)
+            let key = try XCTUnwrap(try rows(store).first).night
+            let record = mirrorRecord(store, key)
+
+            let asleep: [(Double, Double, UInt8)] = [(-1, 2, asleepKind), (2, 5.5, upKind), (5.5, 7 + 5.0 / 60, asleepKind)]
+            let early = try syncWithActivity([sleepA], activity: asleep, at: hour(7 + 5.0 / 60), store: store)
+            XCTAssertFalse(early.nights.contains { $0.window.end > hour(2) }, "no night reaches past A")
+            XCTAssertEqual(try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }, [sleepAWindow])
+            XCTAssertEqual(try napRows(store), [])
+            XCTAssertEqual(early.sleepRound?.activityBlocksJoined, 0, "held, so neither joined…")
+            XCTAssertEqual(early.sleepRound?.activityBlocksAlone, 0, "…nor alone")
+            let none = try await strapFlush(early.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(none, [])
+            XCTAssertEqual(mirrorRecord(store, key), record)
+
+            let later = try syncWithActivity([sleepA], activity: nightActivity(until: 7.5), at: hour(7.5), store: store)
+            XCTAssertEqual(later.nights.map(\.window), [joinedNight])
+            try assertTheJoinedNightIsStored(store)
+            let written = try await strapFlush(later.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(written, [joinedNight], "rewritten once")
+            XCTAssertEqual(extensionBreadcrumbs().count, 1)
+        }
+    }
+
+    /// Decision 58 on a night grown by blocks: A is in Health; the wearer sleeps 05:30–06:00, is up half an
+    /// hour, sleeps again 06:30–07:00. Each settled block that grows the night is one extension written
+    /// once; a sync while the second block goes on, or one with nothing new, writes nothing.
+    func testAGrowingLaterSleepExtendsTheNightOncePerGrowth() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            _ = try syncWithActivity([sleepA], activity: nightActivity(until: 2.25), at: hour(2.25), store: store)
+            try recordWrite(try storedHypnogram(store), store: store)
+            let key = try XCTUnwrap(try rows(store).first).night
+            let night: [(Double, Double, UInt8)] = [(-1, 2, asleepKind), (2, 5.5, upKind), (5.5, 6, asleepKind), (6, 6.5, upKind),
+                                                     (6.5, 7, asleepKind), (7, 9, upKind)]
+            func activity(until: Double) -> [(Double, Double, UInt8)] {
+                night.filter { $0.0 < until }.map { ($0.0, min($0.1, until), $0.2) }
+            }
+            var written: [DateInterval] = []
+
+            let toSix = DateInterval(start: hour(-1), end: hour(6))
+            let first = try syncWithActivity([sleepA], activity: activity(until: 6 + 25.0 / 60), at: hour(6 + 25.0 / 60), store: store)
+            XCTAssertEqual(first.nights.map(\.window), [toSix], "the first block extends the written night")
+            written += try await strapFlush(first.nights.map(\.segments), at: hour(6 + 25.0 / 60), store: store)
+            XCTAssertEqual(written, [toSix])
+            let record = mirrorRecord(store, key)
+
+            let during = try syncWithActivity([sleepA], activity: activity(until: 6.75), at: hour(6.75), store: store)
+            XCTAssertFalse(during.nights.contains { $0.window.end > hour(6) }, "the second block is in progress")
+            written += try await strapFlush(during.nights.map(\.segments), at: hour(6.75), store: store)
+            XCTAssertEqual(mirrorRecord(store, key), record)
+
+            let final = try syncWithActivity([sleepA], activity: activity(until: 7.5), at: hour(7.5), store: store)
+            XCTAssertEqual(final.nights.map(\.window), [joinedNight])
+            XCTAssertEqual(final.sleepRound?.activityBlocksJoined, 2)
+            written += try await strapFlush(final.nights.map(\.segments), at: hour(7.5), store: store)
+            written += try await strapFlush(final.nights.map(\.segments), at: hour(8), store: store)
+            let same = try syncWithActivity([sleepA], activity: activity(until: 9), at: hour(9), store: store)
+            written += try await strapFlush(same.nights.map(\.segments), at: hour(9), store: store)
+            XCTAssertEqual(written, [toSix, joinedNight], "one write per growth")
+            XCTAssertEqual(try mirrorSpan(store), joinedNight)
+            XCTAssertEqual(extensionBreadcrumbs().count, 2)
+            XCTAssertEqual(try rows(store).map(\.asleepMin), [180 + 30 + 30])
+            XCTAssertEqual(inBedSpans(try storedHypnogram(store)),
+                           [sleepAWindow, DateInterval(start: hour(5.5), end: hour(6)), DateInterval(start: hour(6.5), end: hour(7))])
+        }
+    }
+
+    /// Decision 73c: blocks that would stand alone are stored as nothing: an evening doze before the
+    /// night (20:00–21:00), a daytime sleep after it (13:00–14:00), and a night whose only record is the
+    /// night before (no record for tonight). No night row, no nap row; counted in the sleep-round line.
+    func testABlockThatWouldStandAloneIsStoredAsNoNightAndNoNap() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let wholeNight: [(Double, Double, UInt8)] = [(-1, 7, light)]
+            let activity: [(Double, Double, UInt8)] = [(-4, -3, asleepKind), (-3, -1, upKind), (-1, 7, asleepKind), (7, 13, upKind),
+                                                        (13, 14, asleepKind), (14, 15, upKind)]
+            let result = try syncWithActivity([wholeNight], activity: activity, at: hour(15), store: store)
+            XCTAssertEqual(result.nights.map(\.window), [DateInterval(start: hour(-1), end: hour(7))])
+            XCTAssertEqual(try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) },
+                           [DateInterval(start: hour(-1), end: hour(7))])
+            XCTAssertEqual(try rows(store).map(\.asleepMin), [480], "nothing of either block in the night")
+            XCTAssertEqual(try napRows(store), [], "no nap")
+            XCTAssertEqual(result.sleepRound?.activityBlocksJoined, 0)
+            XCTAssertEqual(result.sleepRound?.activityBlocksAlone, 2)
+            XCTAssertEqual(result.sleepRound?.text.hasSuffix("; activity blocks: joined=0 alone=2"), true, result.sleepRound?.text ?? "")
+
+            // The strap's only record is the NEXT night's (23:00–07:00 a day later); the first night has none.
+            let noRecord = try makeStore()
+            let nextNight: [(Double, Double, UInt8)] = [(23, 31, light)]
+            let synced = try syncWithActivity([nextNight], activity: [(-1, 7, asleepKind), (7, 23, upKind), (23, 32, upKind)],
+                                              at: hour(32), store: noRecord)
+            XCTAssertEqual(synced.nights.map(\.window), [DateInterval(start: hour(23), end: hour(31))])
+            XCTAssertEqual(try rows(noRecord).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) },
+                           [DateInterval(start: hour(23), end: hour(31))], "only the night with a record")
+            XCTAssertEqual(try napRows(noRecord), [])
+            XCTAssertEqual(synced.sleepRound?.activityBlocksAlone, 1)
+        }
+    }
+
+    /// Ownership is judged per block (71d). Wore both devices and switched in the awake gap (03:30):
+    /// ring to strap, the strap owns only the block, which has no record of the strap's to join, so
+    /// nothing is stored; strap to ring, the block is the ring's time and is not used, so the night is A.
+    func testABlockInTimeTheRingOwnsIsNotUsed() throws {
+        let cases: [(String, DeviceOwnershipLog, [DateInterval])] = [
+            ("ring to strap", DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: hour(3.5))]), []),
+            ("strap to ring", DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: .distantPast),
+                                                           .init(family: .ringConn, since: hour(3.5))]),
+             [DateInterval(start: hour(-1), end: hour(2))]),
+        ]
+        for (label, log, strapsOwn) in cases {
+            try inFixedZoneSync {
+                ownership.install(log)
+                let store = try makeStore()
+                let result = try syncWithActivity([sleepA], activity: nightActivity(until: 9), at: hour(9), store: store)
+                XCTAssertEqual(result.nights.map(\.window), strapsOwn, label)
+                XCTAssertEqual(try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }, strapsOwn, label)
+                XCTAssertEqual(try napRows(store), [], label)
+                XCTAssertEqual(result.sleepRound?.activityBlocksJoined, 0, label)
+            }
+        }
+    }
+
+    /// The sleep-round line's block counts are digits only, and a sync with no block leaves the line
+    /// decision 72 shipped.
+    func testTheSleepRoundLineCountsBlocksWithNoClockTime() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let joined = try syncWithActivity([sleepA], activity: nightActivity(until: 8), at: hour(8), store: store)
+            let line = try XCTUnwrap(joined.sleepRound?.text)
+            XCTAssertTrue(line.hasSuffix("; activity blocks: joined=1 alone=0"), line)
+            XCTAssertNil(line.range(of: #"\d{1,2}:\d{2}"#, options: .regularExpression), line)
+
+            let none = try syncWithActivity([sleepA], activity: [(-1, 2, asleepKind), (2, 8, upKind)], at: hour(8), store: try makeStore())
+            let plain = try XCTUnwrap(none.sleepRound?.text)
+            XCTAssertFalse(plain.contains("activity blocks"), plain)
+        }
+    }
+}
+
+extension StrapNightHealthTests {
+    /// Decision 73d/73e: the joined block is a sleep window for the skin-temperature gate (its minutes are
+    /// kept, the awake gap's are not), but the temperature watermark stays at the record's end, as
+    /// before decision 73. The activity round starts there at the latest, so the next sync re-fetches
+    /// every minute after the record and sees each block whole.
+    func testTheTemperatureWatermarkStaysAtTheRecordsEndSoTheNextSyncSeesTheBlockWhole() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let result = try syncWithActivity([sleepA], activity: nightActivity(until: 8), temperatureFrom: -1, at: hour(8), store: store)
+            XCTAssertEqual(result.nights.map(\.window), [DateInterval(start: hour(-1), end: hour(7))])
+            XCTAssertEqual(store.helioFetchCursors(device: timeline)[.temperature], hour(2), "held at the record's end")
+            let kind = MetricKind.temperature.rawValue
+            let kept = try store.context.fetch(FetchDescriptor<StoredSample>(predicate: #Predicate { $0.kindRaw == kind })).map(\.start)
+            XCTAssertEqual(kept.filter { $0 >= hour(5.5) && $0 < hour(7) }.count, 90, "the block is a sleep window")
+            XCTAssertEqual(kept.filter { $0 >= hour(2) && $0 < hour(5.5) }.count, 0, "the awake gap is not")
+        }
+    }
+}
+
+// MARK: - Decisions 73f-73h (review-73): the night's edges
+
+extension StrapNightHealthTests {
+    /// Decision 73f, in the production fetch shape: a doze 22:00–22:40, 20 minutes before the record
+    /// (23:00–02:00), is no lead-in. A is written alone at 03:00. The temperature watermark then sits at
+    /// 02:00, so the 08:00 sync fetches activity only from 02:00 (the fake strap re-sends everything, so
+    /// the test sends what production fetches): the later block extends A once, and nothing written is
+    /// ever shortened.
+    func testADozeBeforeTheRecordIsNoLeadInSoNoWrittenNightIsShortened() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let early: [(Double, Double, UInt8)] = [(-2, -1 - 20.0 / 60, asleepKind), (-1 - 20.0 / 60, -1, upKind),
+                                                     (-1, 2, asleepKind), (2, 3, upKind)]
+            let first = try syncWithActivity([sleepA], activity: early, at: hour(3), store: store)
+            XCTAssertEqual(first.nights.map(\.window), [sleepAWindow], "the doze doesn't join")
+            XCTAssertEqual(first.sleepRound?.activityBlocksAlone, 1)
+            XCTAssertEqual(try napRows(store), [], "and is no nap")
+            let firstWrite = try await strapFlush(first.nights.map(\.segments), at: hour(3), store: store)
+            XCTAssertEqual(firstWrite, [sleepAWindow])
+            XCTAssertEqual(store.helioFetchCursors(device: timeline)[.temperature] ?? hour(2), hour(2), "nothing moved it past the record")
+            let before = try XCTUnwrap(try rows(store).first)
+            let (key, beforeStart, beforeAsleep) = (before.night, before.inBedStart, before.asleepMin)
+            XCTAssertEqual(beforeAsleep, 180)
+
+            let fromTwo: [(Double, Double, UInt8)] = [(2, 5.5, upKind), (5.5, 7, asleepKind), (7, 8, upKind)]
+            let second = try syncWithActivity([sleepA], activity: fromTwo, at: hour(8), store: store)
+            XCTAssertEqual(second.nights.map(\.window), [joinedNight])
+            let secondWrite = try await strapFlush(second.nights.map(\.segments), at: hour(8), store: store)
+            XCTAssertEqual(secondWrite, [joinedNight], "one extension")
+            let after = try XCTUnwrap(try rows(store).first)
+            XCTAssertLessThanOrEqual(after.inBedStart, beforeStart, "the written start stands")
+            XCTAssertEqual(after.asleepMin, beforeAsleep + 90)
+            XCTAssertEqual(try mirrorSpan(store), joinedNight)
+            XCTAssertEqual(store.mirroredNight(night: key)?.spanStart, hour(-1))
+            try assertTheJoinedNightIsStored(store)
+        }
+    }
+
+    /// Decision 73g, the review's lie-in: record 23:00–07:00, sleep minutes 07:30–12:10, first sync at
+    /// 13:00. Joined, the night would end after noon and be no night at all. With or without the block,
+    /// the record's night is stored and written once, the block is counted alone, and there is no nap.
+    func testALieInBlockPastTheWakeWindowNeverCostsTheNight() async throws {
+        for withBlock in [false, true] {
+            try await inFixedZone {
+                let label = "with block: \(withBlock)"
+                ownership.install(.strapOwnsAllTime)
+                let store = try makeStore()
+                let recordNight = DateInterval(start: hour(-1), end: hour(7))
+                let activity: [(Double, Double, UInt8)] = withBlock
+                    ? [(-1, 7, asleepKind), (7, 7.5, upKind), (7.5, 12 + 10.0 / 60, asleepKind), (12 + 10.0 / 60, 13, upKind)]
+                    : [(-1, 7, asleepKind), (7, 13, upKind)]
+                let result = try syncWithActivity([[(-1, 7, light)]], activity: activity, at: hour(13), store: store)
+                XCTAssertEqual(result.nights.map(\.window), [recordNight], label)
+                XCTAssertEqual(try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }, [recordNight], label)
+                XCTAssertEqual(try rows(store).map(\.asleepMin), [480], label)
+                XCTAssertEqual(try napRows(store), [], label)
+                XCTAssertEqual(result.sleepRound?.activityBlocksAlone, withBlock ? 1 : 0, label)
+                var written = try await strapFlush(result.nights.map(\.segments), at: hour(13), store: store)
+                written += try await strapFlush([], at: hour(16), store: store)
+                XCTAssertEqual(written, [recordNight], "\(label): written once")
+            }
+        }
+    }
+
+    /// Decision 73h: a sleep minute inside a session's in-bed span never creates or extends a block.
+    /// Asleep only inside A: no block at all. Asleep 01:00–03:00 across A's end: the block is 02:00–03:00,
+    /// the part after A, so the night is A plus that hour, with A's in-bed span as A's own.
+    func testSleepMinutesInsideTheRecordNeverCreateOrExtendABlock() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let inside = try syncWithActivity([sleepA], activity: [(-1, 2, asleepKind), (2, 4, upKind)], at: hour(4), store: try makeStore())
+            XCTAssertEqual(inside.nights.map(\.window), [sleepAWindow])
+            XCTAssertEqual(inside.sleepRound?.activityBlocksJoined, 0)
+            XCTAssertEqual(inside.sleepRound?.activityBlocksAlone, 0)
+
+            let store = try makeStore()
+            let across = try syncWithActivity([sleepA], activity: [(-1, 1, upKind), (1, 3, asleepKind), (3, 4, upKind)],
+                                              at: hour(4), store: store)
+            XCTAssertEqual(across.nights.map(\.window), [DateInterval(start: hour(-1), end: hour(3))])
+            XCTAssertEqual(across.sleepRound?.activityBlocksJoined, 1)
+            XCTAssertEqual(inBedSpans(try storedHypnogram(store)), [sleepAWindow, DateInterval(start: hour(2), end: hour(3))])
+            XCTAssertEqual(try rows(store).map(\.asleepMin), [180 + 60])
+        }
+    }
+}
+
+// MARK: - Decision 73i (review-73b): no block between a night's records
+
+extension StrapNightHealthTests {
+    /// Decision 73i, in the production fetch shape: records A1 23:00–01:00 and A2 02:30–05:00, sleep minutes
+    /// 01:15–02:15 between them. The block is before A2's in-bed end, so it is alone: the night written at
+    /// 06:00 is A1 + A2 (joined by 71b). The watermark then sits at 05:00, so the 08:00 sync fetches
+    /// activity only from 05:00 (the fake strap re-sends everything, so the test sends what production
+    /// fetches) and brings a block 05:30–07:00, after A2: the night extends to 07:00, and every stage and
+    /// in-bed span written at 06:00 is still in the night written at 08:00.
+    func testABlockBetweenTwoRecordsIsAloneSoALaterExtensionDeletesNothingWritten() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let a1: [(Double, Double, UInt8)] = [(-1, 1, light)], a2: [(Double, Double, UInt8)] = [(2.5, 5, light)]
+            let early: [(Double, Double, UInt8)] = [(-1, 1, asleepKind), (1, 1.25, upKind), (1.25, 2.25, asleepKind),
+                                                     (2.25, 2.5, upKind), (2.5, 5, asleepKind), (5, 6, upKind)]
+            let first = try syncWithActivity([a1, a2], activity: early, at: hour(6), store: store)
+            let firstNight = DateInterval(start: hour(-1), end: hour(5))
+            XCTAssertEqual(first.nights.map(\.window), [firstNight])
+            XCTAssertEqual(first.sleepRound?.activityBlocksJoined, 0)
+            XCTAssertEqual(first.sleepRound?.activityBlocksAlone, 1, "the mid-night block is alone")
+            XCTAssertEqual(try napRows(store), [])
+            let firstWrite = try await strapFlush(first.nights.map(\.segments), at: hour(6), store: store)
+            XCTAssertEqual(firstWrite, [firstNight])
+            let writtenFirst = try storedHypnogram(store)
+            let firstAsleep = try XCTUnwrap(try rows(store).first).asleepMin
+            XCTAssertEqual(firstAsleep, 120 + 150)
+            XCTAssertEqual(inBedSpans(writtenFirst), [DateInterval(start: hour(-1), end: hour(1)), DateInterval(start: hour(2.5), end: hour(5))])
+
+            let fromFive: [(Double, Double, UInt8)] = [(5, 5.5, upKind), (5.5, 7, asleepKind), (7, 8, upKind)]
+            let second = try syncWithActivity([a1, a2], activity: fromFive, at: hour(8), store: store)
+            XCTAssertEqual(second.nights.map(\.window), [joinedNight])
+            XCTAssertEqual(second.sleepRound?.activityBlocksJoined, 1)
+            let secondWrite = try await strapFlush(second.nights.map(\.segments), at: hour(8), store: store)
+            XCTAssertEqual(secondWrite, [joinedNight], "one extension")
+            let writtenSecond = try storedHypnogram(store)
+            XCTAssertEqual(try XCTUnwrap(try rows(store).first).asleepMin, firstAsleep + 90)
+            XCTAssertEqual(inBedSpans(writtenSecond), inBedSpans(writtenFirst) + [DateInterval(start: hour(5.5), end: hour(7))])
+            XCTAssertTrue(writtenFirst.allSatisfy(writtenSecond.contains), "nothing written at 06:00 is gone")
+            XCTAssertEqual(try mirrorSpan(store), joinedNight)
+        }
+    }
+}

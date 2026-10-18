@@ -759,6 +759,21 @@ else deep if deep > 42, else light), which it calls arbitrary (`HuamiExtendedSam
 🔴 Prefer the session record; otherwise feed per-minute HR/motion into OpenCircuit's own
 `SleepStaging`.
 
+**A later sleep with no session record** (🟡, one night, owner's strap, fw 3.25.0.3, decision 73):
+after a long mid-night awakening, the strap sent no second `0x48` record for the sleep that
+followed. Its sync delivered one record per night, and the later sleep was present only as `0x01`
+minutes of kind `0x78` after the night's record had ended. So a record can stop at the first wake
+and leave the rest of the night to the activity minutes. Synthetic shape: record 23:00–02:00,
+kind-`0x78` minutes 05:30–07:00, nothing else. OpenCircuit v1 uses those minutes only to complete a
+night that has a record (`HelioSleepSelection.activityBlocks` and `nights(sessions:activityBlocks:)`,
+ZeppKit): a run of kind-sleep minutes outside every staged session's in-bed span, 5 or fewer
+non-sleep minutes inside it kept as an awake gap, 20 min or longer and ended at least 20 min before
+the sync's newest activity minute, becomes a sleep of generic stage (no REM/deep bytes read, no
+`SleepStaging`) that joins its night by the stitch rules of §21.6, only after the in-bed end of the night's last
+record and never at the cost of the night. One that would stand alone is not
+stored. 🔴 whether the strap ever writes a second record for one night, and whether the activity
+REM/deep bytes stage these minutes usefully.
+
 ### 6.6 Sleep session record (`0x48`), 594 bytes
 
 🟡 `GB/devices/huami/HuamiSleepSessionSampleProvider.java:70-195`
@@ -2348,6 +2363,11 @@ the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00�
   daytime.
 - The hardware run of 2026-09-30 got exactly one 594-byte record in a 12-hour window (§10.1). That
   says nothing about naps.
+- **A later sleep of the same night** (🟡, one night, owner's strap, fw 3.25.0.3; decision 73): no
+  second `0x48` record arrived for a sleep after a long mid-night awakening. That sleep was present
+  only as kind-`0x78` activity minutes after the night's record ended (§6.5). Whether a daytime nap
+  gets a record of its own is still open; if it doesn't, a nap too may exist only in the activity
+  minutes.
 
 ### 21.4 When a session record exists, and re-fetching it
 
@@ -2447,6 +2467,25 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   "earlier part = strap nap, later, longer part = the night already in Apple Health" stays split
   after the update, because the joined night ends where the written night ends and so doesn't
   extend it. Nothing is counted twice or lost, and the current stitch never makes that split.
+- **A later sleep from the activity minutes** (decision 73, #278): sleep the strap marks only in its
+  `0x01` minutes (kind `0x78`) outside every staged session (§6.5) becomes an activity sleep block,
+  owned per block, and goes into the same stitch as the session sleeps. A block is kept only when
+  that stitch joins it into a night holding a session record (28f's 60 min or the overnight join
+  above). A block that would stand alone (a daytime sleep, an evening doze, a night with no record)
+  is neither a night nor a nap in v1: it is only counted (`activity blocks: joined=N alone=M` on the
+  sleep-round diagnostics line). A block that may still be going on (its last sleep minute less than
+  20 min before the sync's newest minute) is judged on the next sync. The temperature watermark, and
+  with it the start of the activity re-fetch, stays at the end of the latest session night, so every
+  sync sees each block after the record whole. **Only after the night's last record** (decisions
+  73f, 73i): a block is used only when it starts at or after the in-bed end of the LAST session
+  fragment of the night it would join. A block before a record (a lead-in) or between two records of
+  one night (including one between an evening session and the night) is never joined and is counted
+  alone. Later syncs fetch activity only from the last record's end, so a block written anywhere
+  earlier would be deleted by the next extension's union delete. **A block never costs a night**
+  (73g): a night holding blocks that fails the overnight gates (28c/28d) or is longer than 20 h,
+  while its sessions alone make an overnight sleep, goes back to the sessions' own night, and its
+  blocks are counted alone (a lie-in after the record that ends past noon, for one). Known gap
+  (decision 73j, quoted): "73j (known gap, documented, not fixed; 🔴 shape). A block already written after a night's last fragment can still be deleted if the strap later delivers a NEW `0x48` record for that night that starts after the block, because the block is then no longer after the last fragment. This needs a second record for one night, which the owner's strap has not been seen to write (decision 73's preamble). The general guard, "an extension must hold every in-bed span already written" (review-73b option b), changes 58b for every strap night. It is a follow-up, not part of this build."
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
@@ -2499,3 +2538,7 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
 - 2026-10-18: §21.5 step 3 and §21.6: OpenCircuit joins the overnight sleeps of one night whatever the gap
   (decision 71, #278); the 60-min rule stays for every other sleep; the 71h known gap. No tag was
   promoted.
+- 2026-10-18: §6.5, §21.3 and §21.6: one night on the owner's strap (fw 3.25.0.3) had no second
+  `0x48` record for a sleep after a long awakening; that sleep was present only as kind-`0x78`
+  activity minutes (🟡). OpenCircuit joins such minutes to a night that has a record (decision 73,
+  #278); standalone ones are not stored.
