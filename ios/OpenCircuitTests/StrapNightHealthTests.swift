@@ -1875,8 +1875,10 @@ private let afterTheAwakening: [(Double, Double, UInt8)] = [(5.5, 6, light), (6,
 extension StrapNightHealthTests {
     private var joinedNight: DateInterval { DateInterval(start: hour(-1), end: hour(7)) }
 
+    /// The fragments' in-bed spans. Decision 74 (amended, needs ratification): an awake run of the fill
+    /// (74a) is in bed but no fragment, so it is left out; on a night with no fill this is every `.inBed`.
     private func inBedSpans(_ segments: [SleepSegment]) -> [DateInterval] {
-        segments.filter { $0.stage == .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
+        HelioSleepSelection.withoutAwakeFill(segments).filter { $0.stage == .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
     }
 
     private func napRows(_ store: LocalStore) throws -> [DateInterval] {
@@ -1893,7 +1895,10 @@ extension StrapNightHealthTests {
         let segments = try storedHypnogram(store)
         XCTAssertEqual(inBedSpans(segments), [DateInterval(start: hour(-1), end: hour(2)), DateInterval(start: hour(5.5), end: hour(7))],
                        label, file: file, line: line)
-        XCTAssertFalse(segments.contains { $0.start < hour(5.5) && hour(2) < $0.end }, "\(label): the gap stays a gap", file: file, line: line)
+        // Decision 74 (amended, needs ratification): nothing in the gap but the awake fill of 74a (none
+        // without the strap's heart rate there).
+        XCTAssertFalse(HelioSleepSelection.withoutAwakeFill(segments).contains { $0.start < hour(5.5) && hour(2) < $0.end },
+                       "\(label): the gap stays a gap", file: file, line: line)
         XCTAssertEqual(try napRows(store), [], "\(label): no nap beside the night", file: file, line: line)
     }
 
