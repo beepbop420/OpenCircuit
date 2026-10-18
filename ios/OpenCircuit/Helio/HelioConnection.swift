@@ -319,7 +319,9 @@ final class HelioConnection: NSObject {
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0, breadcrumbs: breadcrumbs) },
             findState: findState,
-            onSyncFinished: { result, timeline in
+            onSyncFinished: { [breadcrumbs] result, timeline in
+                // Decision 72: one counts-only line for a sync that fetched a sleep-session round.
+                if let summary = result.sleepRound { breadcrumbs.strapSleepRound(summary) }
                 let appIsActive = Self.appIsActive   // as the sync ends, before the flush's awaits
                 if !result.interrupted { HelioWakeState().lastCompletedSync = Date() }
                 await HelioConnection.syncEnded(
@@ -561,8 +563,6 @@ extension HelioConnection {
         case .strapNotification(let characteristic):
             breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
             idleTrafficArrived()
-        case .sleepRound(let summary):
-            breadcrumbs.strapSleepRound(summary)
         case .wokeUp:
             // Decision 33, §16.4: an opportunistic hint (🔴 whether the Helio sends it). It carries no
             // time, so nothing is written from it: the catch-up fetches history and the night selection

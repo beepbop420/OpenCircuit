@@ -81,8 +81,6 @@ enum HelioSessionEvent: Equatable {
     /// whether the Helio sends them at all, so they are only ever a hint (§16.4). They carry no time.
     case fellAsleep
     case wokeUp
-    /// Decision 72: a sync that fetched a sleep-session round finished; counts only.
-    case sleepRound(StrapSleepRoundSummary)
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -1010,7 +1008,6 @@ final class HelioSession: WearableSession {
         if isLinkConnected, services?.contains(ZeppEndpoint.battery) == true {
             send(ZeppEndpoint.battery, ZeppBatteryStatus.request)
         }
-        if let summary = result.sleepRound { onEvent(.sleepRound(summary)) }
         let timeline = self.timeline
         Task { @MainActor in await self.onSyncFinished(result, timeline) }
     }

@@ -1376,11 +1376,11 @@ extension DeviceOwnershipAppTests {
 // MARK: - Decision 72 (#278): the sleep round's counts-only line
 
 extension DeviceOwnershipAppTests {
-    /// One strap sync through the production path with the session's events wired to the breadcrumbs as
-    /// `HelioConnection.handle` does. `spans` are sleep sessions in local hours; `sleepMinutes` is a run
+    /// One strap sync through the production path with the session's sync-finished callback wired to the breadcrumbs as
+    /// `HelioConnection` does. `spans` are sleep sessions in local hours; `sleepMinutes` is a run
     /// of kind-sleep activity minutes from a local hour. The "sleep round" lines it left.
     private func sleepRoundLines(spans: [(Double, Double)]?, sleepMinutes: (from: Double, count: Int)? = nil,
-                                 now: Date, store: LocalStore) -> [String] {
+                                 now: Date, store: LocalStore) async -> [String] {
         ownership.install(.strapOwnsAllTime)
         let observability = ObservabilityStore(defaults)
         let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
@@ -1401,49 +1401,50 @@ extension DeviceOwnershipAppTests {
         let keys = OwnershipKeys()
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
                                    sink: HelioStoreSink(store: store), findState: HelioFindState(),
-                                   onEvent: { event in
-                                       if case .sleepRound(let summary) = event { breadcrumbs.strapSleepRound(summary) }
+                                   onSyncFinished: { result, _ in
+                                       if let summary = result.sleepRound { breadcrumbs.strapSleepRound(summary) }
                                    },
                                    clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
         transport.session = session
         session.start()
         transport.drain()
         XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        for _ in 0..<5 { await Task.yield() }   // the sync-finished callback runs in a task
         return observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
     }
 
-    func testASyncThatJoinsTwoOvernightSessionsLeavesOneCountsLineSayingBothArrived() throws {
+    func testASyncThatJoinsTwoOvernightSessionsLeavesOneCountsLineSayingBothArrived() async throws {
         let store = try makeStore()
-        let lines = sleepRoundLines(spans: [(-1, 3), (5, 7)], now: localHour(10), store: store)
+        let lines = await sleepRoundLines(spans: [(-1, 3), (5, 7)], now: localHour(10), store: store)
         XCTAssertEqual(lines, ["sleep round: records=2 staged=2 nights=1 (joined 2) outcomes: inserted=1 updated=0 keptFuller=0 "
             + "ownedByOther=0 keyCollision=0 manualEdit=0 keptOut58b=0 other=0; naps: stored=0 unsettled=0 tooShort=0; "
             + "endsAfterNewestNight=0; activity sleep min outside sessions (24 h)=0"])
     }
 
-    func testASingleSessionWithSleepActivityAfterItShowsNoSecondRecordButTheStrapThinkingItAsleep() throws {
+    func testASingleSessionWithSleepActivityAfterItShowsNoSecondRecordButTheStrapThinkingItAsleep() async throws {
         let store = try makeStore()
-        let lines = sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
+        let lines = await sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
         XCTAssertEqual(lines, ["sleep round: records=1 staged=1 nights=1 (joined 0) outcomes: inserted=1 updated=0 keptFuller=0 "
             + "ownedByOther=0 keyCollision=0 manualEdit=0 keptOut58b=0 other=0; naps: stored=0 unsettled=0 tooShort=0; "
             + "endsAfterNewestNight=0; activity sleep min outside sessions (24 h)=90"])
     }
 
-    func testSleepActivityInsideAStagedSessionIsNotCountedAsOutsideIt() throws {
+    func testSleepActivityInsideAStagedSessionIsNotCountedAsOutsideIt() async throws {
         let store = try makeStore()
-        let lines = sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 1, count: 60), now: localHour(10), store: store)
+        let lines = await sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 1, count: 60), now: localHour(10), store: store)
         XCTAssertEqual(lines.count, 1)
         XCTAssertTrue(lines[0].hasSuffix("activity sleep min outside sessions (24 h)=0"), lines[0])
     }
 
-    func testASyncWithNoSleepRoundLeavesNoSleepLine() throws {
+    func testASyncWithNoSleepRoundLeavesNoSleepLine() async throws {
         let store = try makeStore()
-        let lines = sleepRoundLines(spans: nil, sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
+        let lines = await sleepRoundLines(spans: nil, sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
         XCTAssertEqual(lines, [])
     }
 
-    func testTheSleepRoundLineHoldsNoClockTimeAndNoSampleValue() throws {
+    func testTheSleepRoundLineHoldsNoClockTimeAndNoSampleValue() async throws {
         let store = try makeStore()
-        let lines = sleepRoundLines(spans: [(-1, 3), (5, 7)], sleepMinutes: (from: 8, count: 30), now: localHour(10), store: store)
+        let lines = await sleepRoundLines(spans: [(-1, 3), (5, 7)], sleepMinutes: (from: 8, count: 30), now: localHour(10), store: store)
         let line = try XCTUnwrap(lines.first)
         XCTAssertNil(line.range(of: #"\d{1,2}:\d{2}"#, options: .regularExpression), "no clock time: \(line)")
         // Every number is a count: with them blanked, what is left is fixed wording, so no heart rate,
