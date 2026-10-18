@@ -769,7 +769,8 @@ night that has a record (`HelioSleepSelection.activityBlocks` and `nights(sessio
 ZeppKit): a run of kind-sleep minutes outside every staged session's in-bed span, 5 or fewer
 non-sleep minutes inside it kept as an awake gap, 20 min or longer and ended at least 20 min before
 the sync's newest activity minute, becomes a sleep of generic stage (no REM/deep bytes read, no
-`SleepStaging`) that joins its night by the stitch rules of §21.6. One that would stand alone is not
+`SleepStaging`) that joins its night by the stitch rules of §21.6, only after a session's in-bed end
+and never at the cost of the night. One that would stand alone is not
 stored. 🔴 whether the strap ever writes a second record for one night, and whether the activity
 REM/deep bytes stage these minutes usefully.
 
@@ -2475,9 +2476,15 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   sleep-round diagnostics line). A block that may still be going on (its last sleep minute less than
   20 min before the sync's newest minute) is judged on the next sync. The temperature watermark, and
   with it the start of the activity re-fetch, stays at the end of the latest session night, so every
-  sync sees each block after the record whole. Known gap: a block BEFORE the record (28f, within
-  60 min of its start) is seen only by the syncs that fetch that far back; if a later sync extends
-  the night, the rewritten night lacks that lead-in.
+  sync sees each block after the record whole. **No lead-in from activity minutes** (decision 73f):
+  a block is used only when it lies entirely after the in-bed end of a session of the night it
+  joins; a block before a session's in-bed start is never joined and is counted alone. (Later syncs
+  no longer fetch minutes before the record, so a written lead-in would be deleted by the next
+  extension.) **A block never costs a night** (73g): a night holding blocks that fails the overnight
+  gates (28c/28d) or is longer than 20 h, while its sessions alone make an overnight sleep, goes back
+  to the sessions' own night, and its blocks are counted alone (a lie-in after the record that ends
+  past noon, for one). A block after a separate evening session's end can join it (28f) and, within
+  60 min of the night, bridge it into the night (73h).
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
