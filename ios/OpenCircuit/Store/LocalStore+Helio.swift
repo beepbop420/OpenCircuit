@@ -244,7 +244,6 @@ final class HelioStoreSink: HelioHistorySink {
     private var napLogged: Set<DateInterval> = []
     /// Decision 72: this sync's sleep-session round, for the diagnostics line (counts only).
     private var sleepRoundSeen = false
-    private var sleepRecordsReceived = 0
     private var napsStoredWindows: Set<DateInterval> = []
     private var napsUnsettledWindows: Set<DateInterval> = []
     private var napsTooShortWindows: Set<DateInterval> = []
@@ -298,7 +297,6 @@ final class HelioStoreSink: HelioHistorySink {
         nightOutcomes = [:]
         napLogged = []
         sleepRoundSeen = false
-        sleepRecordsReceived = 0
         napsStoredWindows = []
         napsUnsettledWindows = []
         napsTooShortWindows = []
@@ -316,7 +314,6 @@ final class HelioStoreSink: HelioHistorySink {
             case .sleepSession(let records):
                 sessions += records
                 sleepRoundSeen = true
-                sleepRecordsReceived += records.count
                 try storeNights(timeline: timeline, now: now)
             case .temperature(let minutes):
                 let nights = ownedNights(timeline: timeline, now: now)
@@ -649,8 +646,9 @@ final class HelioStoreSink: HelioHistorySink {
         guard sleepRoundSeen else { return nil }
         let staged = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
         var summary = StrapSleepRoundSummary()
-        summary.records = sleepRecordsReceived
-        summary.staged = staged.count
+        // Distinct records and sessions: a record the strap sends in two rounds is one record.
+        summary.records = Set(sessions.map { DateInterval(start: $0.sleepStart, end: max($0.sleepStart, $0.sleepEnd)) }).count
+        summary.staged = Set(staged.map(\.window)).count
         let nights = ownedNights(timeline: timeline, now: now)
         summary.nights = nights.count
         summary.joinedSessions = nights.map(\.inBedSpans.count).filter { $0 > 1 }.reduce(0, +)
@@ -661,13 +659,13 @@ final class HelioStoreSink: HelioHistorySink {
         summary.napsTooShort = napsTooShortWindows.count
         if let oldest = staged.map(\.window.start).min() {
             let newestStoredEnd = store.storedNightWindows(from: oldest, to: now).map(\.end).max() ?? .distantPast
-            summary.endsAfterNewestNight = staged.filter { $0.window.end > newestStoredEnd }.count
+            summary.endsAfterNewestNight = Set(staged.filter { $0.window.end > newestStoredEnd }.map(\.window)).count
         }
         let since = now.addingTimeInterval(-24 * 3600)
-        summary.activitySleepMinutesOutsideSessions = activity.filter { minute in
+        summary.activitySleepMinutesOutsideSessions = Set(activity.filter { minute in
             minute.kind == ZeppActivityMinute.kindSleep && minute.time >= since && minute.time <= now
                 && !staged.contains { $0.window.start <= minute.time && minute.time < $0.window.end }
-        }.count
+        }.map(\.time)).count
         return summary
     }
 }

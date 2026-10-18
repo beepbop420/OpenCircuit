@@ -1401,10 +1401,10 @@ extension DeviceOwnershipAppTests {
         let keys = OwnershipKeys()
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
                                    sink: HelioStoreSink(store: store), findState: HelioFindState(),
-                                   clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true,
                                    onEvent: { event in
                                        if case .sleepRound(let summary) = event { breadcrumbs.strapSleepRound(summary) }
-                                   })
+                                   },
+                                   clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
         transport.session = session
         session.start()
         transport.drain()
@@ -1450,7 +1450,7 @@ extension DeviceOwnershipAppTests {
         // stage, score or timestamp can ride along.
         let skeleton = line.replacingOccurrences(of: #"\d+"#, with: "N", options: .regularExpression)
         XCTAssertEqual(skeleton, "sleep round: records=N staged=N nights=N (joined N) outcomes: inserted=N updated=N keptFuller=N "
-            + "ownedByOther=N keyCollision=N manualEdit=N keptOut58b=N other=N; naps: stored=N unsettled=N tooShort=N; "
+            + "ownedByOther=N keyCollision=N manualEdit=N keptOutNb=N other=N; naps: stored=N unsettled=N tooShort=N; "
             + "endsAfterNewestNight=N; activity sleep min outside sessions (N h)=N")
     }
 

@@ -5,7 +5,7 @@ import OpenCircuitKit
 /// diagnostics bundle can tell "the strap never sent a second `0x48` record" from "it was sent and
 /// dropped". No time, no length, no sample value: the line is safe to export.
 struct StrapSleepRoundSummary: Equatable {
-    /// 72a: `0x48` records received this sync.
+    /// 72a: distinct `0x48` records received this sync (one sent in two rounds counts once).
     var records = 0
     /// Of those, the sessions `night(from:now:)` staged (non-nil).
     var staged = 0
