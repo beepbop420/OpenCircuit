@@ -1372,3 +1372,104 @@ extension DeviceOwnershipAppTests {
         XCTAssertEqual(pending, [after])
     }
 }
+
+// MARK: - Decision 72 (#278): the sleep round's counts-only line
+
+extension DeviceOwnershipAppTests {
+    /// One strap sync through the production path with the session's events wired to the breadcrumbs as
+    /// `HelioConnection.handle` does. `spans` are sleep sessions in local hours; `sleepMinutes` is a run
+    /// of kind-sleep activity minutes from a local hour. The "sleep round" lines it left.
+    private func sleepRoundLines(spans: [(Double, Double)]?, sleepMinutes: (from: Double, count: Int)? = nil,
+                                 now: Date, store: LocalStore) -> [String] {
+        ownership.install(.strapOwnsAllTime)
+        let observability = ObservabilityStore(defaults)
+        let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
+        let device = makeStrap()
+        let reference = localHour(0)
+        if let spans {
+            device.fetchData[.sleepSession] = (stamp(reference.timeIntervalSince1970 - 86_400),
+                                               spans.flatMap { localSession($0.0, $0.1, stages: [($0.0, $0.1, 0x04)], midnight: reference) })
+        } else {
+            device.fetchData[.sleepSession] = nil
+        }
+        if let sleepMinutes {
+            device.fetchData[.activity] = (stamp(localHour(sleepMinutes.from).timeIntervalSince1970),
+                                           (0..<sleepMinutes.count).flatMap { _ in [0x78, 0x08, 0, 55, 0, 0, 0, 0] as [UInt8] })
+        }
+        clock = now
+        let transport = OwnershipTransport(device: device)
+        let keys = OwnershipKeys()
+        let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
+                                   sink: HelioStoreSink(store: store), findState: HelioFindState(),
+                                   clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true,
+                                   onEvent: { event in
+                                       if case .sleepRound(let summary) = event { breadcrumbs.strapSleepRound(summary) }
+                                   })
+        transport.session = session
+        session.start()
+        transport.drain()
+        XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        return observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
+    }
+
+    func testASyncThatJoinsTwoOvernightSessionsLeavesOneCountsLineSayingBothArrived() throws {
+        let store = try makeStore()
+        let lines = sleepRoundLines(spans: [(-1, 3), (5, 7)], now: localHour(10), store: store)
+        XCTAssertEqual(lines, ["sleep round: records=2 staged=2 nights=1 (joined 2) outcomes: inserted=1 updated=0 keptFuller=0 "
+            + "ownedByOther=0 keyCollision=0 manualEdit=0 keptOut58b=0 other=0; naps: stored=0 unsettled=0 tooShort=0; "
+            + "endsAfterNewestNight=0; activity sleep min outside sessions (24 h)=0"])
+    }
+
+    func testASingleSessionWithSleepActivityAfterItShowsNoSecondRecordButTheStrapThinkingItAsleep() throws {
+        let store = try makeStore()
+        let lines = sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
+        XCTAssertEqual(lines, ["sleep round: records=1 staged=1 nights=1 (joined 0) outcomes: inserted=1 updated=0 keptFuller=0 "
+            + "ownedByOther=0 keyCollision=0 manualEdit=0 keptOut58b=0 other=0; naps: stored=0 unsettled=0 tooShort=0; "
+            + "endsAfterNewestNight=0; activity sleep min outside sessions (24 h)=90"])
+    }
+
+    func testSleepActivityInsideAStagedSessionIsNotCountedAsOutsideIt() throws {
+        let store = try makeStore()
+        let lines = sleepRoundLines(spans: [(-1, 3)], sleepMinutes: (from: 1, count: 60), now: localHour(10), store: store)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].hasSuffix("activity sleep min outside sessions (24 h)=0"), lines[0])
+    }
+
+    func testASyncWithNoSleepRoundLeavesNoSleepLine() throws {
+        let store = try makeStore()
+        let lines = sleepRoundLines(spans: nil, sleepMinutes: (from: 5, count: 90), now: localHour(10), store: store)
+        XCTAssertEqual(lines, [])
+    }
+
+    func testTheSleepRoundLineHoldsNoClockTimeAndNoSampleValue() throws {
+        let store = try makeStore()
+        let lines = sleepRoundLines(spans: [(-1, 3), (5, 7)], sleepMinutes: (from: 8, count: 30), now: localHour(10), store: store)
+        let line = try XCTUnwrap(lines.first)
+        XCTAssertNil(line.range(of: #"\d{1,2}:\d{2}"#, options: .regularExpression), "no clock time: \(line)")
+        // Every number is a count: with them blanked, what is left is fixed wording, so no heart rate,
+        // stage, score or timestamp can ride along.
+        let skeleton = line.replacingOccurrences(of: #"\d+"#, with: "N", options: .regularExpression)
+        XCTAssertEqual(skeleton, "sleep round: records=N staged=N nights=N (joined N) outcomes: inserted=N updated=N keptFuller=N "
+            + "ownedByOther=N keyCollision=N manualEdit=N keptOut58b=N other=N; naps: stored=N unsettled=N tooShort=N; "
+            + "endsAfterNewestNight=N; activity sleep min outside sessions (N h)=N")
+    }
+
+    /// 72c: its own key, at most 4 lines per 12 h window and one per 10 minutes, so a day of re-syncs
+    /// can't take more than a quarter of the sync lines' budget, and link lines are a separate budget.
+    func testSleepRoundLinesAreBudgetedAndNeverCrowdOutLinkLines() {
+        var now = localHour(8)
+        let observability = ObservabilityStore(defaults)
+        let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { now })
+        for _ in 0..<10 {
+            breadcrumbs.strapSleepRound(StrapSleepRoundSummary())
+            now = now.addingTimeInterval(11 * 60)
+        }
+        for _ in 0..<HelioBreadcrumbBudget.Kind.link.linesPerWindow {
+            breadcrumbs.bluetoothOff(standingConnectArmed: true)
+            now = now.addingTimeInterval(11 * 60)
+        }
+        let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
+        XCTAssertEqual(lines.filter { $0.hasPrefix("sleep round:") }.count, 4)
+        XCTAssertEqual(lines.filter { $0.hasPrefix("Bluetooth off") }.count, HelioBreadcrumbBudget.Kind.link.linesPerWindow)
+    }
+}

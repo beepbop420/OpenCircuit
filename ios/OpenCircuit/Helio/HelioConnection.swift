@@ -561,6 +561,8 @@ extension HelioConnection {
         case .strapNotification(let characteristic):
             breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
             idleTrafficArrived()
+        case .sleepRound(let summary):
+            breadcrumbs.strapSleepRound(summary)
         case .wokeUp:
             // Decision 33, §16.4: an opportunistic hint (🔴 whether the Helio sends it). It carries no
             // time, so nothing is written from it: the catch-up fetches history and the night selection

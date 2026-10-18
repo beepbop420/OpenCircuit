@@ -63,6 +63,9 @@ struct HelioSyncResult: Equatable {
     /// Its nights skip the 20-minute quiet margin in the post-sync hook's flush, as they would have in
     /// the run's own, if that flush starts within 30 minutes of T (decision 31).
     var nightsFinalized: Date?
+    /// Decision 72: counts for the diagnostics line when this sync fetched a sleep-session round; nil
+    /// otherwise.
+    var sleepRound: StrapSleepRoundSummary?
 }
 
 /// What a session reports to its connection beyond a finished sync (#233): breadcrumbs and wakes.
@@ -78,6 +81,8 @@ enum HelioSessionEvent: Equatable {
     /// whether the Helio sends them at all, so they are only ever a hint (§16.4). They carry no time.
     case fellAsleep
     case wokeUp
+    /// Decision 72: a sync that fetched a sleep-session round finished; counts only.
+    case sleepRound(StrapSleepRoundSummary)
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -1005,6 +1010,7 @@ final class HelioSession: WearableSession {
         if isLinkConnected, services?.contains(ZeppEndpoint.battery) == true {
             send(ZeppEndpoint.battery, ZeppBatteryStatus.request)
         }
+        if let summary = result.sleepRound { onEvent(.sleepRound(summary)) }
         let timeline = self.timeline
         Task { @MainActor in await self.onSyncFinished(result, timeline) }
     }

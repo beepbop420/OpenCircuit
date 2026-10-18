@@ -242,6 +242,12 @@ final class HelioStoreSink: HelioHistorySink {
     private var nightOutcomes: [DateInterval: SleepPersistOutcome] = [:]
     /// #231: nap verdicts already logged this sync, so a re-run logs each once.
     private var napLogged: Set<DateInterval> = []
+    /// Decision 72: this sync's sleep-session round, for the diagnostics line (counts only).
+    private var sleepRoundSeen = false
+    private var sleepRecordsReceived = 0
+    private var napsStoredWindows: Set<DateInterval> = []
+    private var napsUnsettledWindows: Set<DateInterval> = []
+    private var napsTooShortWindows: Set<DateInterval> = []
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
@@ -291,6 +297,11 @@ final class HelioStoreSink: HelioHistorySink {
         keptApartLogged = []
         nightOutcomes = [:]
         napLogged = []
+        sleepRoundSeen = false
+        sleepRecordsReceived = 0
+        napsStoredWindows = []
+        napsUnsettledWindows = []
+        napsTooShortWindows = []
         latestStress = nil
         latestPAI = nil
     }
@@ -304,6 +315,8 @@ final class HelioStoreSink: HelioHistorySink {
                 try store.ingestHelioStepMinutes(ZeppMetricMapping.stepMinutes(from: round.parsed), device: timeline, now: now)
             case .sleepSession(let records):
                 sessions += records
+                sleepRoundSeen = true
+                sleepRecordsReceived += records.count
                 try storeNights(timeline: timeline, now: now)
             case .temperature(let minutes):
                 let nights = ownedNights(timeline: timeline, now: now)
@@ -492,6 +505,8 @@ final class HelioStoreSink: HelioHistorySink {
         let log = LocalStore.ownershipLog()
         let family = DeviceOwnershipLog.Family(timeline: timeline)
         var storedAsNaps: Set<DateInterval> = []
+        napsUnsettledWindows.formUnion(split.unsettled.map(\.window))
+        napsTooShortWindows.formUnion(split.tooShort.map(\.window))
         for nap in split.naps {
             let span = Self.clockSpan(nap.window, in: nap.recordedTimeZone)
             guard log.ownsWholly(family, from: nap.window.start, to: nap.window.end) else {
@@ -513,6 +528,7 @@ final class HelioStoreSink: HelioHistorySink {
                 continue
             }
             storedAsNaps.insert(nap.window)
+            napsStoredWindows.insert(nap.window)
             if napLogged.insert(nap.window).inserted {
                 helioLog.notice("helio: sleep session \(span, privacy: .public) stored as a nap")
             }
@@ -623,6 +639,35 @@ final class HelioStoreSink: HelioHistorySink {
         result.todaySteps = try? store.todaySteps(day: now)
         result.latestStress = latestStress
         result.latestPAI = latestPAI
+        result.sleepRound = sleepRoundSummary(timeline: timeline, now: now)
         return result
+    }
+
+    /// Decision 72: the counts for this sync's diagnostics line, nil when no sleep-session round came.
+    /// Reads only; nothing here stores, stitches or writes.
+    private func sleepRoundSummary(timeline: SyncDeviceID, now: Date) -> StrapSleepRoundSummary? {
+        guard sleepRoundSeen else { return nil }
+        let staged = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+        var summary = StrapSleepRoundSummary()
+        summary.records = sleepRecordsReceived
+        summary.staged = staged.count
+        let nights = ownedNights(timeline: timeline, now: now)
+        summary.nights = nights.count
+        summary.joinedSessions = nights.map(\.inBedSpans.count).filter { $0 > 1 }.reduce(0, +)
+        for outcome in nightOutcomes.values { summary.outcomes[outcome, default: 0] += 1 }
+        summary.keptOut58b = keptApartLogged.count
+        summary.napsStored = napsStoredWindows.count
+        summary.napsUnsettled = napsUnsettledWindows.count
+        summary.napsTooShort = napsTooShortWindows.count
+        if let oldest = staged.map(\.window.start).min() {
+            let newestStoredEnd = store.storedNightWindows(from: oldest, to: now).map(\.end).max() ?? .distantPast
+            summary.endsAfterNewestNight = staged.filter { $0.window.end > newestStoredEnd }.count
+        }
+        let since = now.addingTimeInterval(-24 * 3600)
+        summary.activitySleepMinutesOutsideSessions = activity.filter { minute in
+            minute.kind == ZeppActivityMinute.kindSleep && minute.time >= since && minute.time <= now
+                && !staged.contains { $0.window.start <= minute.time && minute.time < $0.window.end }
+        }.count
+        return summary
     }
 }
