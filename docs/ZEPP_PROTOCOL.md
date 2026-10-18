@@ -2461,7 +2461,8 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
 - **One night, whatever the gap** (decision 71, #278): the stitch that runs before the nap split
   (`HelioSleepSelection.stitch`) also joins the overnight sleeps of one night key, judged on the
   night joined so far, as long as the joined night is no longer than 20 h. Neither part of such a
-  night is a nap, and the awake gap between them stays a gap (no segment is written for it). Known
+  night is a nap, and the awake gap between them stays a gap (no segment is written for it), except
+  where decision 74 fills it (next item). Known
   gap kept: a first part that ends before midnight, more than 60 min before the rest, is no
   overnight sleep and is not joined. Second known gap (71h): a night an earlier build split as
   "earlier part = strap nap, later, longer part = the night already in Apple Health" stays split
@@ -2486,6 +2487,17 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   while its sessions alone make an overnight sleep, goes back to the sessions' own night, and its
   blocks are counted alone (a lie-in after the record that ends past noon, for one). Known gap
   (decision 73j, quoted): "73j (known gap, documented, not fixed; 🔴 shape). A block already written after a night's last fragment can still be deleted if the strap later delivers a NEW `0x48` record for that night that starts after the block, because the block is then no longer after the last fragment. This needs a second record for one night, which the owner's strap has not been seen to write (decision 73's preamble). The general guard, "an extension must hold every in-bed span already written" (review-73b option b), changes 58b for every strap night. It is a follow-up, not part of this build."
+- **The awake time between fragments** (decision 74, #278): when the night is stored, each gap
+  between two of its fragments is filled where the store holds the strap's own heart rate (its
+  timeline, time it owns): those minutes are awake and in bed, merged into runs that bridge up to 5
+  minutes without heart rate, each run one `.awake` and one `.inBed` segment
+  (`HelioSleepSelection.awakeFilled`). Minutes without heart rate stay a gap, and nothing is filled
+  before the first fragment or after the last. The fill comes from the stored rows, never a sync's
+  fetched minutes, so every copy of the night carries the same fill; the sync's activity round,
+  which stores the heart rate, runs before its sleep round, and a night whose gap heart rate is
+  stored later gets the fill on its next re-delivery. Naps and the stitch never see the fill (it is
+  added after both). The readers that judge sleep (temperature gate and verdict, overnight HRV) take
+  the fragments' spans (`sleepSpans`), never a run.
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
@@ -2542,3 +2554,5 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   `0x48` record for a sleep after a long awakening; that sleep was present only as kind-`0x78`
   activity minutes (🟡). OpenCircuit joins such minutes to a night that has a record (decision 73,
   #278); standalone ones are not stored.
+- 2026-10-18: §21.6: the awake time between a night's fragments is awake and in bed where the strap's
+  own heart rate is stored (decision 74, #278); unworn minutes stay a gap. No tag was promoted.

@@ -1875,8 +1875,10 @@ private let afterTheAwakening: [(Double, Double, UInt8)] = [(5.5, 6, light), (6,
 extension StrapNightHealthTests {
     private var joinedNight: DateInterval { DateInterval(start: hour(-1), end: hour(7)) }
 
+    /// The fragments' in-bed spans. Decision 74 (amended, needs ratification): an awake run of the fill
+    /// (74a) is in bed but no fragment, so it is left out; on a night with no fill this is every `.inBed`.
     private func inBedSpans(_ segments: [SleepSegment]) -> [DateInterval] {
-        segments.filter { $0.stage == .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
+        HelioSleepSelection.withoutAwakeFill(segments).filter { $0.stage == .inBed }.map { DateInterval(start: $0.start, end: $0.end) }
     }
 
     private func napRows(_ store: LocalStore) throws -> [DateInterval] {
@@ -1885,7 +1887,10 @@ extension StrapNightHealthTests {
 
     /// The joined night as stored: one row over the union, both sleeps' stages and one `.inBed` each,
     /// and nothing for the awake gap.
-    private func assertTheJoinedNightIsStored(_ store: LocalStore, _ label: String = "",
+    /// `wornThroughTheGap`: the fixture's activity minutes carry the strap's heart rate through the whole
+    /// gap (02:00–05:30), so decision 74a fills exactly that gap with one awake run (74f(1)); otherwise
+    /// the store holds no heart rate there and there is no run at all.
+    private func assertTheJoinedNightIsStored(_ store: LocalStore, _ label: String = "", wornThroughTheGap: Bool = false,
                                               file: StaticString = #filePath, line: UInt = #line) throws {
         let stored = try rows(store)
         XCTAssertEqual(stored.map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }, [joinedNight], label, file: file, line: line)
@@ -1893,7 +1898,16 @@ extension StrapNightHealthTests {
         let segments = try storedHypnogram(store)
         XCTAssertEqual(inBedSpans(segments), [DateInterval(start: hour(-1), end: hour(2)), DateInterval(start: hour(5.5), end: hour(7))],
                        label, file: file, line: line)
-        XCTAssertFalse(segments.contains { $0.start < hour(5.5) && hour(2) < $0.end }, "\(label): the gap stays a gap", file: file, line: line)
+        // Decision 74f (ratified amendment): nothing in the gap but the awake fill of 74a, and that fill
+        // exactly: one run over the whole gap when the fixture is worn through it, none otherwise. A run
+        // reaching into a fragment, a duplicated run or a partial one fails here.
+        XCTAssertFalse(HelioSleepSelection.withoutAwakeFill(segments).contains { $0.start < hour(5.5) && hour(2) < $0.end },
+                       "\(label): the gap stays a gap", file: file, line: line)
+        XCTAssertEqual(HelioSleepSelection.awakeFillRuns(in: segments),
+                       wornThroughTheGap ? [DateInterval(start: hour(2), end: hour(5.5))] : [],
+                       "\(label): the exact awake fill", file: file, line: line)
+        XCTAssertEqual(segments.filter { $0.start < hour(5.5) && hour(2) < $0.end }.count, wornThroughTheGap ? 2 : 0,
+                       "\(label): one .inBed and one .awake over the gap, no duplicate", file: file, line: line)
         XCTAssertEqual(try napRows(store), [], "\(label): no nap beside the night", file: file, line: line)
     }
 
@@ -2418,7 +2432,7 @@ extension StrapNightHealthTests {
 
             let morning = try syncWithActivity([sleepA], activity: nightActivity(until: 8), at: hour(8), store: store)
             XCTAssertEqual(morning.nights.map(\.window), [joinedNight], "stored and handed to the flush")
-            try assertTheJoinedNightIsStored(store)
+            try assertTheJoinedNightIsStored(store, wornThroughTheGap: true)
             XCTAssertEqual(try XCTUnwrap(try rows(store).first).night, key, "in A's row")
             XCTAssertEqual(morning.sleepRound?.activityBlocksJoined, 1)
             XCTAssertEqual(morning.sleepRound?.activityBlocksAlone, 0)
@@ -2437,7 +2451,7 @@ extension StrapNightHealthTests {
             let rewritten = try await strapFlush(again.nights.map(\.segments), at: hour(9), store: store)
             XCTAssertEqual(rewritten, [], "the signature no-op")
             XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(13)), [])
-            try assertTheJoinedNightIsStored(store)
+            try assertTheJoinedNightIsStored(store, wornThroughTheGap: true)
             XCTAssertEqual(extensionBreadcrumbs().count, 1)
         }
     }
@@ -2458,7 +2472,7 @@ extension StrapNightHealthTests {
                 }
                 let morning = try syncWithActivity([sleepA], activity: nightActivity(until: 7.5), at: hour(7.5), store: store)
                 XCTAssertEqual(morning.nights.map(\.window), [joinedNight], label)
-                try assertTheJoinedNightIsStored(store, label)
+                try assertTheJoinedNightIsStored(store, label, wornThroughTheGap: true)
                 written += try await strapFlush(morning.nights.map(\.segments), at: hour(7.5), store: store)
                 written += try await strapFlush(morning.nights.map(\.segments), at: hour(8), store: store)
                 written += try await strapFlush([], at: hour(12), store: store)
@@ -2494,7 +2508,7 @@ extension StrapNightHealthTests {
 
             let later = try syncWithActivity([sleepA], activity: nightActivity(until: 7.5), at: hour(7.5), store: store)
             XCTAssertEqual(later.nights.map(\.window), [joinedNight])
-            try assertTheJoinedNightIsStored(store)
+            try assertTheJoinedNightIsStored(store, wornThroughTheGap: true)
             let written = try await strapFlush(later.nights.map(\.segments), at: hour(7.5), store: store)
             XCTAssertEqual(written, [joinedNight], "rewritten once")
             XCTAssertEqual(extensionBreadcrumbs().count, 1)
@@ -2675,7 +2689,7 @@ extension StrapNightHealthTests {
             XCTAssertEqual(after.asleepMin, beforeAsleep + 90)
             XCTAssertEqual(try mirrorSpan(store), joinedNight)
             XCTAssertEqual(store.mirroredNight(night: key)?.spanStart, hour(-1))
-            try assertTheJoinedNightIsStored(store)
+            try assertTheJoinedNightIsStored(store, wornThroughTheGap: true)
         }
     }
 
@@ -2767,6 +2781,364 @@ extension StrapNightHealthTests {
             XCTAssertEqual(inBedSpans(writtenSecond), inBedSpans(writtenFirst) + [DateInterval(start: hour(5.5), end: hour(7))])
             XCTAssertTrue(writtenFirst.allSatisfy(writtenSecond.contains), "nothing written at 06:00 is gone")
             XCTAssertEqual(try mirrorSpan(store), joinedNight)
+        }
+    }
+}
+
+// MARK: - Decision 74 (#278): the awake time between a strap night's fragments
+//
+// The joined night of decision 71 (sleep A 23:00–02:00, the sleep after the awakening 05:30–07:00).
+// Where the store holds the strap's own heart rate in the gap, that time is awake and in bed: one
+// `.awake` and one `.inBed` segment per run (74a), derived from the STORED rows (74b). Where it holds
+// none, the gap stays a gap. Every heart rate, minute and night here is synthetic.
+
+extension StrapNightHealthTests {
+    /// The strap's heart rate, one reading a minute over local hours `from ..< to`, stored for its timeline.
+    private func storeHeartRate(_ from: Double, _ to: Double, store: LocalStore, bpm: Double = 62) throws {
+        let samples = stride(from: hour(from).timeIntervalSince1970, to: hour(to).timeIntervalSince1970, by: 60).map {
+            QuantitySample(kind: .heartRate, start: Date(timeIntervalSince1970: $0), value: bpm)
+        }
+        _ = try store.ingest(samples, device: timeline)
+    }
+
+    /// The awake runs in `segments` (an `.inBed` and an `.awake` over the same span).
+    private func awakeRuns(_ segments: [SleepSegment]) -> [DateInterval] {
+        HelioSleepSelection.awakeFillRuns(in: segments)
+    }
+
+    /// The joined night as this build stores it with no heart rate in the store: what build 82 stored.
+    private func joinedNightWithoutFill() throws -> HelioSleepSelection.Night {
+        let reference = try makeStore()
+        let night = try XCTUnwrap(try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: reference).nights.first)
+        XCTAssertEqual(awakeRuns(night.segments), [])
+        return night
+    }
+
+    /// The state build 82 left on the owner's phone: the joined night stored and written without its
+    /// fill, while the store already held the strap's heart rate for the whole night. The key.
+    private func storeAndWriteAsBuild82(_ store: LocalStore) throws -> Date {
+        let night = try joinedNightWithoutFill()
+        try storeHeartRate(-1, 8, store: store)
+        XCTAssertEqual(try store.saveHelioNight(night, device: timeline), .inserted)
+        XCTAssertEqual(try recordWrite(night.segments, store: store), joinedNight)
+        return try XCTUnwrap(try rows(store).first).night
+    }
+
+    /// 74d, the owner's shape: the re-delivered night differs from the written one only by the fill
+    /// inside the written span. It is stored with the fill, rewritten once, the record's span (the union
+    /// delete) is still the written span, and the next flush is the signature no-op.
+    func testAJoinedNightWrittenWithoutItsFillIsRewrittenOnceWithItOnReDelivery() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let key = try storeAndWriteAsBuild82(store)
+            let unfilled = try storedHypnogram(store)
+
+            let morning = try syncSessions([sleepA, afterTheAwakening], at: hour(8.5), store: store)
+            XCTAssertEqual(morning.nights.map(\.window), [joinedNight], "the same window")
+            let stored = try storedHypnogram(store)
+            XCTAssertEqual(awakeRuns(stored), [DateInterval(start: hour(2), end: hour(5.5))])
+            XCTAssertEqual(morning.nights.map(\.segments), [stored], "handed to the flush as stored")
+            XCTAssertEqual(HelioSleepSelection.withoutAwakeFill(stored), unfilled, "the fragments as written")
+            XCTAssertEqual(try XCTUnwrap(try rows(store).first).asleepMin, 270)
+
+            let written = try await strapFlush(morning.nights.map(\.segments), at: hour(8.5), store: store)
+            XCTAssertEqual(written, [joinedNight], "rewritten once")
+            let record = try XCTUnwrap(store.mirroredNight(night: key))
+            XCTAssertEqual(record.signature, HealthKitWriter.sleepSignature(stored))
+            XCTAssertEqual(DateInterval(start: record.spanStart, end: record.spanEnd), joinedNight,
+                           "the delete covers the written span, nothing outside it")
+            XCTAssertEqual(extensionBreadcrumbs(), [], "no extension: the same span")
+
+            let again = try syncSessions([sleepA, afterTheAwakening], at: hour(9.5), store: store)
+            let rewritten = try await strapFlush(again.nights.map(\.segments), at: hour(9.5), store: store)
+            XCTAssertEqual(rewritten, [], "the signature no-op")
+            let outcome = await HealthKitWriter().mirrorStrapNight(local: store, segments: stored)
+            XCTAssertTrue(isSignatureNoOp(outcome))
+            XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(13)), [])
+        }
+    }
+
+    /// The card reads the stored summary: the run is time in bed and awake time, so the 98%-style
+    /// efficiency drops (74e) and the "nothing was recorded" caption gives way to the plain one.
+    func testTheCardCountsTheAwakeRunAsTimeInBed() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            _ = try storeAndWriteAsBuild82(store)
+            let before = SleepStaging.summary(try storedHypnogram(store))
+            _ = try syncSessions([sleepA, afterTheAwakening], at: hour(8.5), store: store)
+            let row = try XCTUnwrap(try rows(store).first)
+            let after = SleepStaging.summary(try storedHypnogram(store))
+            XCTAssertEqual(before.minutes.inBed, 270)
+            XCTAssertEqual(after.minutes.inBed, 480, "the fragments + the 210-minute run")
+            XCTAssertEqual(after.minutes.awake, before.minutes.awake + 210)
+            XCTAssertEqual(row.awakeMin, after.minutes.awake)
+            XCTAssertEqual(row.asleepMin, before.minutes.asleep, "no sleep added")
+            XCTAssertLessThan(row.efficiency, before.efficiency)
+            let asleep = row.sleepWake.timeIntervalSince(row.sleepOnset)
+            XCTAssertFalse(SleepWindowCaption.isContiguous(span: asleep, measuredInBed: before.inBed))
+            XCTAssertTrue(SleepWindowCaption.isContiguous(span: asleep, measuredInBed: after.inBed))
+        }
+    }
+
+    /// 74d: not written yet. Stored with its fill, held behind the margin, then written once with it.
+    func testAJoinedNightNotYetWrittenIsWrittenOnceWithItsFillAfterTheMargin() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            try storeHeartRate(-1, 8, store: store)
+            let early = try syncSessions([sleepA, afterTheAwakening], at: hour(7 + 13.0 / 60), store: store)
+            XCTAssertEqual(awakeRuns(try storedHypnogram(store)), [DateInterval(start: hour(2), end: hour(5.5))])
+            let held = try await strapFlush(early.nights.map(\.segments), at: hour(7 + 13.0 / 60), store: store)
+            XCTAssertEqual(held, [], "inside the margin")
+
+            let later = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            let written = try await strapFlush(later.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(written, [joinedNight], "written once")
+            let key = try XCTUnwrap(try rows(store).first).night
+            XCTAssertEqual(store.mirroredNight(night: key)?.signature, HealthKitWriter.sleepSignature(try storedHypnogram(store)))
+
+            let again = try syncSessions([sleepA, afterTheAwakening], at: hour(8.5), store: store)
+            let rewritten = try await strapFlush(again.nights.map(\.segments), at: hour(8.5), store: store)
+            XCTAssertEqual(rewritten, [])
+        }
+    }
+
+    /// 74b, every path the same segments: a night build 82 stored without its fill and never wrote, that
+    /// the strap no longer re-delivers, is offered by the 50b backstop with the fill the store path
+    /// gives it, written once, and then offered no more. A refusal of that offer is noted against the
+    /// stored hypnogram like any other (#259).
+    func testTheBackstopOffersAStoredNightWithTheFillTheStorePathGivesIt() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let night = try joinedNightWithoutFill()
+            let expected = HelioSleepSelection.awakeFilled(night.segments, window: night.window,
+                                                           heartRateMinutes: stride(from: hour(-1).timeIntervalSince1970,
+                                                                                    to: hour(8).timeIntervalSince1970, by: 60)
+                                                               .map { Date(timeIntervalSince1970: $0) })
+            XCTAssertEqual(awakeRuns(expected), [DateInterval(start: hour(2), end: hour(5.5))])
+            for declined in [false, true] {
+                let store = try makeStore()
+                try storeHeartRate(-1, 8, store: store)
+                XCTAssertEqual(try store.saveHelioNight(night, device: timeline), .inserted)
+                let storedKey = try XCTUnwrap(try rows(store).first).night
+                clearMirror(storedKey)   // the mirror records live in the standard defaults, by key
+                defer { StrapNightDeclinedOverlay.clear(storedNight: storedKey) }
+                let filledByStorePath = try makeStore()
+                try storeHeartRate(-1, 8, store: filledByStorePath)
+                _ = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: filledByStorePath)
+                XCTAssertEqual(try storedHypnogram(filledByStorePath), expected, "the store path's segments")
+
+                let offered = store.strapNightsAwaitingHealth(timeline: timeline, now: hour(10.5))
+                XCTAssertEqual(offered, [expected], "the backstop's segments")
+                if declined {
+                    store.noteStrapNightDeclined(expected)
+                    XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(10.5)), [], "noted, not offered again")
+                    continue
+                }
+                let written = try await strapFlush([], at: hour(10.5), store: store)
+                XCTAssertEqual(written, [joinedNight])
+                let key = try XCTUnwrap(try rows(store).first).night
+                XCTAssertEqual(store.mirroredNight(night: key)?.signature, HealthKitWriter.sleepSignature(expected))
+                let again = try await strapFlush([], at: hour(11), store: store)
+                XCTAssertEqual(again, [], "offered no more")
+            }
+        }
+    }
+
+    /// 74d: a night with one fragment is byte-identical, with the strap's heart rate all night.
+    func testANightWithOneFragmentIsByteIdenticalWithHeartRateAllNight() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let single: [(Double, Double, UInt8)] = [(-1, 2, light), (2, 2.5, awake), (2.5, 7, deep)]
+            let reference = try makeStore()
+            let plain = try syncSessions([single], at: hour(8), store: reference)
+            let store = try makeStore()
+            try storeHeartRate(-2, 9, store: store)
+            let withHR = try syncSessions([single], at: hour(8), store: store)
+            XCTAssertEqual(withHR.nights, plain.nights)
+            XCTAssertEqual(try XCTUnwrap(try rows(store).first).hypnogramData, try XCTUnwrap(try rows(reference).first).hypnogramData)
+            XCTAssertEqual(store.helioAwakeFilled(withHR.nights[0].segments, window: withHR.nights[0].window, device: timeline),
+                           withHR.nights[0].segments)
+        }
+    }
+
+    /// 74a: heart rate in part of the gap (02:00–03:00, 04:30–05:30). Those parts are awake and in bed;
+    /// 03:00–04:30 has none and stays a gap.
+    func testHeartRateMissingInPartOfTheGapLeavesThatPartAGap() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            try storeHeartRate(2, 3, store: store)
+            try storeHeartRate(4.5, 5.5, store: store)
+            let result = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            let stored = try storedHypnogram(store)
+            XCTAssertEqual(awakeRuns(stored), [DateInterval(start: hour(2), end: hour(3)), DateInterval(start: hour(4.5), end: hour(5.5))])
+            XCTAssertFalse(stored.contains { $0.start < hour(4.5) && hour(3) < $0.end }, "the unworn part stays a gap")
+            XCTAssertEqual(result.nights.map(\.segments), [stored])
+            XCTAssertEqual(SleepStaging.summary(stored).minutes.inBed, 270 + 120)
+            let written = try await strapFlush(result.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(written, [joinedNight])
+        }
+    }
+
+    /// Decision 28: the ring owns 03:00–04:00 (a switch to it and back). The strap's heart rate there,
+    /// even stored under the strap's timeline, fills nothing; the strap's own time around it is filled.
+    func testTheRingsTimeInTheGapIsNotFilled() throws {
+        try inFixedZoneSync {
+            ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: .distantPast),
+                                                           .init(family: .ringConn, since: hour(3)),
+                                                           .init(family: .zeppOS, since: hour(4))]))
+            let store = try makeStore()
+            try storeHeartRate(-1, 8, store: store)
+            _ = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            XCTAssertEqual(try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }, [joinedNight])
+            XCTAssertEqual(awakeRuns(try storedHypnogram(store)),
+                           [DateInterval(start: hour(2), end: hour(3)), DateInterval(start: hour(4), end: hour(5.5))])
+        }
+    }
+
+    /// 74f(2): another device's heart rate never fills a strap gap. The ring's readings cover the whole
+    /// night, the strap owns all of it, and the store holds no strap heart rate: no awake run.
+    func testAnotherDevicesHeartRateInTheGapFillsNothing() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let ringHR = stride(from: hour(-1).timeIntervalSince1970, to: hour(8).timeIntervalSince1970, by: 60).map {
+                QuantitySample(kind: .heartRate, start: Date(timeIntervalSince1970: $0), value: 60)
+            }
+            _ = try store.ingest(ringHR, device: .ringConn)
+            let result = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            let stored = try storedHypnogram(store)
+            XCTAssertEqual(awakeRuns(stored), [], "the ring's heart rate fills nothing")
+            XCTAssertFalse(stored.contains { $0.start < hour(5.5) && hour(2) < $0.end }, "the gap stays a gap")
+            XCTAssertEqual(result.nights.map(\.segments), [stored])
+        }
+    }
+
+    /// 74b: the fill comes from the store, never the sync's fetched minutes. A later sync that fetched
+    /// only the minutes after 07:30 (none of the gap) stores and hands over the same fill.
+    func testAReDeliveryThatFetchedFewerMinutesKeepsTheSameFill() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let wholeNight: [(Double, Double, UInt8)] = [(-1, 2, asleepKind), (2, 5.5, upKind), (5.5, 7, asleepKind), (7, 7.5, upKind)]
+            let first = try syncWithActivity([sleepA, afterTheAwakening], activity: wholeNight, at: hour(7.5), store: store)
+            let filled = try storedHypnogram(store)
+            XCTAssertEqual(awakeRuns(filled), [DateInterval(start: hour(2), end: hour(5.5))])
+            XCTAssertEqual(first.nights.map(\.segments), [filled])
+
+            let later = try syncWithActivity([sleepA, afterTheAwakening], activity: [(7.5, 8.5, upKind)], at: hour(8.5), store: store)
+            XCTAssertEqual(try storedHypnogram(store), filled)
+            XCTAssertEqual(later.nights.map(\.segments), [filled])
+        }
+    }
+
+    /// 74b: a night stored before its gap's heart rate was (the activity round didn't reach it) gets the
+    /// fill on the re-delivery after the heart rate is stored, and that reaches Health once.
+    func testAGapWhoseHeartRateArrivesLaterIsFilledOnThatReDelivery() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let first = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            XCTAssertEqual(awakeRuns(try storedHypnogram(store)), [])
+            let firstWrite = try await strapFlush(first.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(firstWrite, [joinedNight])
+
+            let later = try syncWithActivity([sleepA, afterTheAwakening], activity: [(2, 5.5, upKind), (7, 9, upKind)],
+                                             at: hour(9), store: store)
+            XCTAssertEqual(awakeRuns(try storedHypnogram(store)), [DateInterval(start: hour(2), end: hour(5.5))])
+            let rewrite = try await strapFlush(later.nights.map(\.segments), at: hour(9), store: store)
+            XCTAssertEqual(rewrite, [joinedNight], "rewritten once with the fill")
+            XCTAssertEqual(try mirrorSpan(store), joinedNight)
+            let again = try await strapFlush(later.nights.map(\.segments), at: hour(9.5), store: store)
+            XCTAssertEqual(again, [])
+        }
+    }
+
+    /// Decision 58 still works with the fill: A written at 02:15, then the joined night (an extension)
+    /// with its fill is rewritten once, as 58b admits it.
+    func testANightThatGrowsAfterItWasWrittenIsExtendedWithItsFill() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            try storeHeartRate(-1, 2.25, store: store)
+            _ = try syncSessions([sleepA], at: hour(2.25), store: store)
+            try recordWrite(try storedHypnogram(store), store: store)
+            try storeHeartRate(2.25, 8, store: store)
+            let morning = try syncSessions([sleepA, afterTheAwakening], at: hour(7.5), store: store)
+            XCTAssertEqual(morning.nights.map(\.window), [joinedNight])
+            let stored = try storedHypnogram(store)
+            XCTAssertEqual(awakeRuns(stored), [DateInterval(start: hour(2), end: hour(5.5))])
+            let written = try await strapFlush(morning.nights.map(\.segments), at: hour(7.5), store: store)
+            XCTAssertEqual(written, [joinedNight], "one extension")
+            XCTAssertEqual(try mirrorSpan(store), joinedNight)
+            XCTAssertEqual(store.mirroredNight(night: try XCTUnwrap(try rows(store).first).night)?.signature,
+                           HealthKitWriter.sleepSignature(stored))
+            XCTAssertEqual(extensionBreadcrumbs().count, 1)
+        }
+    }
+
+    /// 74d: an edited night is untouched. Build 82's night, edited, re-delivered with heart rate in the
+    /// gap: nothing is stored over it, nothing is handed over, and the mirror leaves it alone.
+    func testAnEditedNightGetsNoFill() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let key = try storeAndWriteAsBuild82(store)
+            let row = try XCTUnwrap(try rows(store).first)
+            row.isManuallyEdited = true
+            row.editedInBedStart = hour(-1)
+            row.editedInBedEnd = hour(7)
+            try store.context.save()
+            let hypnogram = row.hypnogramData
+            let record = mirrorRecord(store, key)
+
+            let morning = try syncSessions([sleepA, afterTheAwakening], at: hour(8.5), store: store)
+            XCTAssertEqual(morning.nights.count, 0)
+            XCTAssertEqual(try XCTUnwrap(try rows(store).first).hypnogramData, hypnogram)
+            let filled = store.helioAwakeFilled(SleepHypnogramCodec.decode(hypnogram), window: joinedNight, device: timeline)
+            let outcome = await HealthKitWriter().mirrorStrapNight(local: store, segments: filled)
+            XCTAssertTrue(isSignatureNoOp(outcome))
+            let flushed = try await strapFlush(morning.nights.map(\.segments), at: hour(8.5), store: store)
+            XCTAssertEqual(flushed, [])
+            XCTAssertEqual(mirrorRecord(store, key), record)
+        }
+    }
+
+    /// 74c: the readers that judge sleep give build 82's results on the filled night. Skin temperature
+    /// 31 °C and HRV 90 ms in the gap (where the strap's heart rate makes a run) are in neither the
+    /// nightly verdict nor the overnight stress score, on the save path and the repair pass.
+    func testTheFillMovesNoSleepReader() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let expected = try XCTUnwrap(SleepStress.overnightScore(rmssd: [41, 44, 47]))
+            let store = try makeStore()
+            try storeHeartRate(-1, 8, store: store)
+            let night = try XCTUnwrap(try syncSessions([sleepA, afterTheAwakening], at: hour(9), store: store).nights.first)
+            XCTAssertEqual(awakeRuns(night.segments), [DateInterval(start: hour(2), end: hour(5.5))])
+            XCTAssertEqual(night.sleepSpans, [DateInterval(start: hour(-1), end: hour(2)), DateInterval(start: hour(5.5), end: hour(7))])
+            let temperatures = stride(from: hour(-1).timeIntervalSince1970, to: hour(7).timeIntervalSince1970, by: 300).map { t in
+                let time = Date(timeIntervalSince1970: t)
+                return QuantitySample(kind: .temperature, start: time, value: time > hour(2) && time < hour(5.5) ? 31 : 34)
+            }
+            _ = try store.ingest(temperatures, device: timeline)
+            let hrv = zip([hour(0), hour(1), hour(6)], [41.0, 47, 44]).map { QuantitySample(kind: .hrvSDNN, start: $0, value: $1) }
+                + [QuantitySample(kind: .hrvSDNN, start: hour(3.5), value: 90)]
+            _ = try store.ingest(hrv, device: timeline)
+
+            XCTAssertEqual(try store.saveHelioNight(night, device: timeline), .updated)
+            let row = try XCTUnwrap(try rows(store).first)
+            XCTAssertEqual(row.skinTempC, 34, accuracy: 1e-9, "the run's 31 °C is not in the mean")
+            XCTAssertEqual(row.stressScore, expected, "the run's HRV is not in the score")
+            for clearSleepScore in [true, false] {
+                row.stressScore = 0
+                if clearSleepScore { row.sleepScore = 0 }
+                try store.context.save()
+                _ = try store.scoreUnscoredHelioNights()
+                XCTAssertEqual(try XCTUnwrap(try rows(store).first).stressScore, expected, "the repair pass (sleep score cleared: \(clearSleepScore))")
+            }
         }
     }
 }

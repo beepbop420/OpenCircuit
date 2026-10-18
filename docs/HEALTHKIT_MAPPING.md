@@ -79,7 +79,7 @@ stores and writes what it measured for time it owned:
     recorded in, from the strap's own local-midnight reference (28e). First, each session's sleep is
     kept only when the strap owns its own window (28a); only those sleeps, 60 min or less apart, are
     then stitched into one night (`HelioSleepSelection.stitch`, 28f): segments exactly as reported,
-    the gap left a gap. Two overnight sleeps of one night key (each passing both gates above, the
+    the gap left a gap (until decision 74's awake fill, below). Two overnight sleeps of one night key (each passing both gates above, the
     shared `HelioSleepSelection.isOvernightSleep`, 71a) are stitched whatever the gap, so a long
     mid-night awakening never splits a night (decision 71b, #278); the joined night is no longer
     than 20 h. (Stitching before that check let a doze from before a ring → strap switch
@@ -140,6 +140,23 @@ stores and writes what it measured for time it owned:
     later, so it is a 58b extension, rewritten once (write first, union delete), and a night not
     yet written is written once after its settle margin. Without activity minutes (that round
     failed or ran out of time) nothing changes;
+  - the awake time between a night's fragments (decision 74, #278): in a night with more than one
+    fragment, each minute between two fragments where the store holds the strap's own heart rate
+    (`.heartRate` under its timeline, for time the strap owns, decision 28) is awake and in bed.
+    Those minutes are merged into runs that bridge up to 5 minutes without heart rate; each run is
+    one `.awake` and one `.inBed` segment, so Apple Health gets `HKCategoryValueSleepAnalysis.awake`
+    and `.inBed` samples there through the same writer path, and time in bed is the fragments plus
+    the runs (efficiency and the Sleep Score drop by the awake time). Minutes with no heart rate
+    (strap off, nothing recorded) stay a gap: nothing is written for them. Nothing is filled before
+    the first fragment or after the last. The fill is measured, never asserted, and derived from the
+    STORED heart rate, never a sync's fetched minutes (`LocalStore.helioAwakeFilled`), so the night
+    the sync stores, the one it hands to its flush and the one the 50a/50b paths rebuild from the
+    stored hypnogram carry the same segments. A night already in Health that differs from the
+    written one only by the fill (same span) is rewritten once by the writer's signature rewrite
+    (write first, union delete within the written span); a single-fragment night, a ring night and
+    an edited night are byte-identical. The skin-temperature gate and verdict and the overnight HRV
+    judge the sleep fragments only (`HelioSleepSelection.sleepSpans`), never a run; resting HR reads
+    asleep segments only, so all four are unchanged;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
