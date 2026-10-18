@@ -375,14 +375,14 @@ final class HelioStoreSink: HelioHistorySink {
         // Decision 28e (review-224d S-2): both judged in the zone the night was RECORDED in (the strap's
         // own local-midnight reference), never the phone's zone at sync time, so a normal night first
         // synced after a flight is still a night. Same functions, one explicit calendar.
+        // Decision 71a (#278): the one shared predicate (`HelioSleepSelection.overnightVerdict`), which
+        // `stitch` also uses to join the overnight sleeps of one night.
         let overnight = nights.filter { night in
-            let calendar = night.recordedCalendar
-            let isOvernight = SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end, calendar: calendar)
-            let endsInWakeWindow = SleepNightKey.endsInWakeWindow(night.window.end, calendar: calendar)
-            if isOvernight, endsInWakeWindow { return true }
+            let verdict = HelioSleepSelection.overnightVerdict(night)
+            if verdict == .overnight { return true }
             if notOvernightLogged.insert(night.window).inserted {
                 let span = Self.clockSpan(night.window, in: night.recordedTimeZone)
-                if !isOvernight {
+                if verdict == .notOvernight {
                     helioLog.notice("helio: sleep session \(span, privacy: .public) is not overnight; not stored as a night")
                 } else {
                     helioLog.notice("helio: sleep session \(span, privacy: .public) doesn't end in its night's wake window; not stored as a night")
@@ -395,9 +395,10 @@ final class HelioStoreSink: HelioHistorySink {
         for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
         where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
             && !storedNights.contains(where: { $0.window == night.window }) {
-            // Decision 28f stitches sessions 60 min or less apart into one night, so a night can grow
-            // after it was written to Apple Health (back to bed within the hour, after the Sleep Focus
-            // finalization or the settle margin let the first part through), and the strap lets the
+            // Decision 28f stitches sessions 60 min or less apart into one night, and decision 71b
+            // (#278) the overnight sleeps of one night key whatever the gap, so a night can grow after
+            // it was written to Apple Health (back to bed after a mid-night awakening, after the Sleep
+            // Focus finalization or the settle margin let the first part through), and the strap lets the
             // phone read a night still in progress (decision 58, #274), so a night written early can
             // be far shorter than the final record. The written night stands against anything that
             // does not EXTEND it (decision 58b): a different night for its key is kept out unless it
@@ -407,8 +408,9 @@ final class HelioStoreSink: HelioHistorySink {
             // settle margin. Anything else is kept out, so Health gets no second write of it and
             // nothing written is silently replaced or shortened. A night not yet written still
             // stitches. The later session is not stored as a row of its own: it is 60 min or less
-            // from the night, so §21.5 makes it part of the main sleep, never a nap (#231,
-            // `storeNaps` never sees it).
+            // from the night, or an overnight sleep of the night's own key (71c), so it is part of the
+            // main sleep, never a nap (#231, `storeNaps` never sees it). A joined night overlaps the
+            // written first part and ends later, so it is an extension like any other (71e).
             var extending: DateInterval?
             if let written = store.writtenNightSpan(for: night),
                abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
@@ -447,8 +449,8 @@ final class HelioStoreSink: HelioHistorySink {
     }
 
     /// The outcomes that mean another night holds the sleep's key, so the sleep itself is no night: the
-    /// longer part of its own night (review-224e S-2), the other device's night (28a), or a night the
-    /// key already names (28d). Any other outcome (stored, kept as edited, deferred, failed) leaves the
+    /// longer part of its own night (review-224e S-2; since decision 71b only when joining the two would
+    /// exceed `maxNightLength`), the other device's night (28a), or a night the key already names (28d). Any other outcome (stored, kept as edited, deferred, failed) leaves the
     /// sleep a night, never a nap.
     private static let nightKeptOut: Set<SleepPersistOutcome> = [.keptFullerStoredNight, .ownedByOtherDevice, .refusedNightKeyCollision]
 
@@ -512,7 +514,8 @@ final class HelioStoreSink: HelioHistorySink {
             breadcrumbs?.strapSleepTooShort(day: Calendar.current.startOfDay(for: sleep.window.end))
         }
         // Review-224e S-2: a sleep more than 60 min from the night's longer part is kept out of its
-        // night; say whether it is a nap now, without its time or length.
+        // night (since decision 71b only one that joining would push past `maxNightLength`); say
+        // whether it is a nap now, without its time or length.
         for sleep in keptOutOfItsNight where (try? store.sleepSummaryOverlapping(start: sleep.window.start, end: sleep.window.end)) == nil {
             breadcrumbs?.strapSleepKeptOut(nightKey: SleepNightKey.night(inBedStart: sleep.window.start, inBedEnd: sleep.window.end),
                                            storedAsNap: storedAsNaps.contains(sleep.window))
