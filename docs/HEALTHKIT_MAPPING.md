@@ -79,10 +79,14 @@ stores and writes what it measured for time it owned:
     recorded in, from the strap's own local-midnight reference (28e). First, each session's sleep is
     kept only when the strap owns its own window (28a); only those sleeps, 60 min or less apart, are
     then stitched into one night (`HelioSleepSelection.stitch`, 28f): segments exactly as reported,
-    the gap left a gap. (Stitching before that check let a doze from before a ring → strap switch
+    the gap left a gap. Two overnight sleeps of one night key (each passing both gates above, the
+    shared `HelioSleepSelection.isOvernightSleep`, 71a) are stitched whatever the gap, so a long
+    mid-night awakening never splits a night (decision 71b, #278); the joined night is no longer
+    than 20 h. (Stitching before that check let a doze from before a ring → strap switch
     drag the strap's night into ring time, so neither device kept it: review-224e S-1, fixed in
     #225.) Anything else gets a log line and never takes a night key; it may be a nap (below);
-  - a sleep more than 60 min from the rest of its night is not stitched, and its night key already
+  - a sleep more than 60 min from the rest of its night that the overnight join doesn't reach (one
+    that would make the joined night longer than 20 h) is not stitched, and its night key already
     holds the longer part. A `helio-link` breadcrumb notes that it happened and whether it was
     stored as a nap (no time, no length);
   - strap naps (#231, `ZEPP_PROTOCOL.md` §21.5, `HelioSleepSelection.naps`): a strap sleep that is no
@@ -112,7 +116,10 @@ stores and writes what it measured for time it owned:
     (50b) alike (decision 58e); after the rewrite the written span covers it and it is not offered
     again, and a declined offer is noted like any other (#259). Why: the strap lets the phone read a
     night still in progress, so a night written early could be hours short and was then locked in.
-    A night not yet written still stitches;
+    A night not yet written still stitches. A night joined over a long awakening (71b) overlaps its
+    written first part and ends later, so it is an extension like any other; its store prunes an
+    auto nap an earlier build kept for the later part, so the rewrite's union delete clears that
+    nap's samples too (71e);
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;

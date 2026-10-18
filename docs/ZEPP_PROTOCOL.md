@@ -2407,7 +2407,13 @@ Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the pho
    Zepp's sleep plan (no known config arg), so use **00:00–08:00**, as the strap does without a
    plan, and let the user change it. If several overlap, take the longest.
 3. Any other session that starts or ends **more than 60 minutes** from the main sleep is a **nap**.
-   One within 60 minutes belongs to the main sleep (merge the two).
+   One within 60 minutes belongs to the main sleep (merge the two). OpenCircuit departs from this
+   for one shape (decision 71, #278): two **overnight sleeps of one night** (each passes the
+   overnight gate and ends in its key's wake window, and both file under the same night key) are
+   one night whatever the gap between them, so a long awakening in the middle of the night
+   (asleep 23:00–02:00, awake until 05:00, asleep 05:00–07:00) never splits the night into a night
+   and a nap. The 60-minute rule still decides every other sleep (an evening doze, a daytime or
+   late-morning sleep).
 4. Drop sessions under 20 minutes. The strap shouldn't send them; if one arrives, it's a sign that
    the rule above is wrong. Log it.
 5. HealthKit has no nap type: write a nap's stages as ordinary `sleepAnalysis` samples
@@ -2432,6 +2438,12 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
 - **Settling**: a nap is judged only once 60 min have passed since it ended, so a later session that
   would stitch onto it (28f) has had its chance. A night stored later still prunes an auto nap it
   overlaps.
+- **One night, whatever the gap** (decision 71, #278): the stitch that runs before the nap split
+  (`HelioSleepSelection.stitch`) also joins the overnight sleeps of one night key, judged on the
+  night joined so far, as long as the joined night is no longer than 20 h. Neither part of such a
+  night is a nap, and the awake gap between them stays a gap (no segment is written for it). Known
+  gap kept: a first part that ends before midnight, more than 60 min before the rest, is no
+  overnight sleep and is not joined.
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
@@ -2481,3 +2493,5 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   rule, what the references say (nothing), how a nap probably appears in `0x48`, re-fetching
   sessions, the phone-side nap rule; capture item 29.
 - 2026-10-03: §21.6, what the app implements of §21.5 for strap naps (#231). No tag was promoted.
+- 2026-10-18: §21.5 step 3 and §21.6: OpenCircuit joins the overnight sleeps of one night whatever the gap
+  (decision 71, #278); the 60-min rule stays for every other sleep. No tag was promoted.

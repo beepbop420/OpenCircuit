@@ -210,7 +210,8 @@ final class HelioBreadcrumbs {
     }
 
     /// Review-224e S-2: a strap sleep more than 60 min from the rest of its night was kept out (the
-    /// night's longer part holds the key). Since #231 such a sleep is judged as a nap: `storedAsNap`
+    /// night's longer part holds the key). Since decision 71b (#278) only one the overnight join can't
+    /// reach (it would make the night longer than 20 h). Since #231 such a sleep is judged as a nap: `storedAsNap`
     /// says whether it was stored as one (it isn't while it is under 20 min, still settling, or not
     /// wholly in the strap's time). No time, no length. At most one line of each kind per night per
     /// 12 h window: every sync re-delivers the sessions.
