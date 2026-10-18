@@ -2372,11 +2372,16 @@ private func nightActivity(until: Double) -> [(Double, Double, UInt8)] {
 extension StrapNightHealthTests {
     /// One strap sync at `now` delivering each of `sessions` as its own session record and the activity
     /// minutes `activity` (contiguous spans of local hours, each one kind), through the production path.
+    /// `temperatureFrom`: skin temperature minutes from that local hour to `now`.
     private func syncWithActivity(_ sessions: [[(Double, Double, UInt8)]], activity: [(Double, Double, UInt8)],
-                                  at now: Date, store: LocalStore) throws -> HelioSyncResult {
+                                  temperatureFrom: Double? = nil, at now: Date, store: LocalStore) throws -> HelioSyncResult {
         clock = now
         let device = makeStrap(sessions[0])
         device.fetchData[.sleepSession] = (stamp(hour(0).timeIntervalSince1970 - 86_400), sessions.flatMap(session))
+        if let temperatureFrom {
+            let count = Int((now.timeIntervalSince(hour(temperatureFrom)) / 60).rounded())
+            device.fetchData[.temperature] = (stamp(hour(temperatureFrom).timeIntervalSince1970), temperatureMinutes(count, centi: 3350))
+        }
         if let first = activity.first {
             let bytes = activity.flatMap { span in
                 (0..<Int(((span.1 - span.0) * 60).rounded())).flatMap { _ in [span.2, 0x08, 0, 55, 0, 0, 0, 0] as [UInt8] }
@@ -2611,6 +2616,26 @@ extension StrapNightHealthTests {
             let none = try syncWithActivity([sleepA], activity: [(-1, 2, asleepKind), (2, 8, upKind)], at: hour(8), store: try makeStore())
             let plain = try XCTUnwrap(none.sleepRound?.text)
             XCTAssertFalse(plain.contains("activity blocks"), plain)
+        }
+    }
+}
+
+extension StrapNightHealthTests {
+    /// Decision 73d/73e: the joined block is a sleep window for the skin-temperature gate (its minutes are
+    /// kept, the awake gap's are not), but the temperature watermark stays at the record's end, as
+    /// before decision 73. The activity round starts there at the latest, so the next sync re-fetches
+    /// every minute after the record and sees each block whole.
+    func testTheTemperatureWatermarkStaysAtTheRecordsEndSoTheNextSyncSeesTheBlockWhole() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let result = try syncWithActivity([sleepA], activity: nightActivity(until: 8), temperatureFrom: -1, at: hour(8), store: store)
+            XCTAssertEqual(result.nights.map(\.window), [DateInterval(start: hour(-1), end: hour(7))])
+            XCTAssertEqual(store.helioFetchCursors(device: timeline)[.temperature], hour(2), "held at the record's end")
+            let kind = MetricKind.temperature.rawValue
+            let kept = try store.context.fetch(FetchDescriptor<StoredSample>(predicate: #Predicate { $0.kindRaw == kind })).map(\.start)
+            XCTAssertEqual(kept.filter { $0 >= hour(5.5) && $0 < hour(7) }.count, 90, "the block is a sleep window")
+            XCTAssertEqual(kept.filter { $0 >= hour(2) && $0 < hour(5.5) }.count, 0, "the awake gap is not")
         }
     }
 }

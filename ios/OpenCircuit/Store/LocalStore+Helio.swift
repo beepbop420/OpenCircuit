@@ -329,7 +329,7 @@ final class HelioStoreSink: HelioHistorySink {
                     proposed: HelioFetchPlan.advancedCursor(previous: previous, round: round, now: now),
                     previous: previous,
                     earliestWearUnknown: HelioSkinTemperatureGate.earliestWearUnknown(temperatures: minutes, activity: activity),
-                    latestNightEnd: nights.map(\.window.end).max(), now: now)
+                    latestNightEnd: sessionNightsEnd(timeline: timeline, now: now), now: now)
                 if let held, held != previous { try store.setHelioFetchCursor(.temperature, to: held, device: timeline) }
                 return true
             case .autoStress(let minutes):
@@ -382,6 +382,18 @@ final class HelioStoreSink: HelioHistorySink {
         let blocks = HelioSleepSelection.activityBlocks(from: activity, sessions: staged, now: now)
             .filter { log.owner(ofNightFrom: $0.window.start, to: $0.window.end) == family }
         return HelioSleepSelection.nights(sessions: ownedSessions(staged, timeline: timeline), activityBlocks: blocks)
+    }
+
+    /// Decision 73d: the latest end of the strap's own SESSION nights (no activity block), which holds
+    /// the temperature watermark exactly as before decision 73. The activity round starts at that
+    /// watermark at the latest (`HelioFetchPlan.plan`), so every sync re-fetches the activity minutes
+    /// after the night's record ended, and a block is always judged whole: one held while in progress,
+    /// and an earlier block of a night that keeps growing. Held at a joined block's end instead, the
+    /// next sync would miss the earlier block's minutes, and an extension without them would replace
+    /// the night in Apple Health.
+    private func sessionNightsEnd(timeline: SyncDeviceID, now: Date) -> Date? {
+        let staged = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+        return HelioSleepSelection.stitch(ownedSessions(staged, timeline: timeline)).map(\.window.end).max()
     }
 
     /// The staged sessions the strap owns, each judged on its own window (decision 28a/71d).
