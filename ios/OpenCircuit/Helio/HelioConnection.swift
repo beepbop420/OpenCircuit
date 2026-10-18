@@ -319,7 +319,9 @@ final class HelioConnection: NSObject {
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0, breadcrumbs: breadcrumbs) },
             findState: findState,
-            onSyncFinished: { result, timeline in
+            onSyncFinished: { [breadcrumbs] result, timeline in
+                // Decision 72: one counts-only line for a sync that fetched a sleep-session round.
+                if let summary = result.sleepRound { breadcrumbs.strapSleepRound(summary) }
                 let appIsActive = Self.appIsActive   // as the sync ends, before the flush's awaits
                 if !result.interrupted { HelioWakeState().lastCompletedSync = Date() }
                 await HelioConnection.syncEnded(

@@ -63,6 +63,9 @@ struct HelioSyncResult: Equatable {
     /// Its nights skip the 20-minute quiet margin in the post-sync hook's flush, as they would have in
     /// the run's own, if that flush starts within 30 minutes of T (decision 31).
     var nightsFinalized: Date?
+    /// Decision 72: counts for the diagnostics line when this sync fetched a sleep-session round; nil
+    /// otherwise.
+    var sleepRound: StrapSleepRoundSummary?
 }
 
 /// What a session reports to its connection beyond a finished sync (#233): breadcrumbs and wakes.

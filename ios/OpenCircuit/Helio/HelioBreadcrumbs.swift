@@ -237,6 +237,13 @@ final class HelioBreadcrumbs {
         }
     }
 
+    /// Decision 72 (#278): one line per sync that fetched a sleep-session round, counts only (see
+    /// `StrapSleepRoundSummary`). Its own key, at most 4 per 12 h window, so it can't take more than a
+    /// quarter of the sync lines' budget; the 10-minute key interval keeps a burst of re-syncs to one.
+    func strapSleepRound(_ summary: StrapSleepRoundSummary) {
+        keyed("sleep-round", .sync, perWindow: 4) { summary.text }
+    }
+
     // MARK: Strap messages
 
     /// A message the strap sent on its own, outside a request this app started: the endpoint, the
