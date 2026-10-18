@@ -2473,7 +2473,11 @@ naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where 
   above). A block that would stand alone (a daytime sleep, an evening doze, a night with no record)
   is neither a night nor a nap in v1: it is only counted (`activity blocks: joined=N alone=M` on the
   sleep-round diagnostics line). A block that may still be going on (its last sleep minute less than
-  20 min before the sync's newest minute) is judged on the next sync.
+  20 min before the sync's newest minute) is judged on the next sync. The temperature watermark, and
+  with it the start of the activity re-fetch, stays at the end of the latest session night, so every
+  sync sees each block after the record whole. Known gap: a block BEFORE the record (28f, within
+  60 min of its start) is seen only by the syncs that fetch that far back; if a later sync extends
+  the night, the rewritten night lacks that lead-in.
 - **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
 - **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
 - A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
