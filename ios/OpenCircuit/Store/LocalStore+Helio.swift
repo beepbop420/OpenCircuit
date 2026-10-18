@@ -133,7 +133,8 @@ extension LocalStore {
         var extras = SleepNightExtras()
         extras.hypnogram = segments
         let temperatures = helioTemperatures(in: window, device: device)
-        switch SkinTempBaseline.nightlyVerdict(samples: temperatures, in: window) {
+        // Decision 71i: judged over the night's in-bed spans, so a joined night's awake gap is no sleep.
+        switch HelioSkinTemperatureGate.nightlyVerdict(samples: temperatures, inBedSpans: night.inBedSpans) {
         case .published(let mean): extras.skinTempC = mean
         case .rejectedCoverage: extras.skinTempWithheld = true
         case .notMeasured: break
@@ -305,8 +306,11 @@ final class HelioStoreSink: HelioHistorySink {
                 sessions += records
                 try storeNights(timeline: timeline, now: now)
             case .temperature(let minutes):
-                let windows = ownedNights(timeline: timeline, now: now).map(\.window)
-                let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity, sleepWindows: windows)
+                let nights = ownedNights(timeline: timeline, now: now)
+                // Decision 71i: each night's in-bed spans, so a minute in a joined night's awake gap
+                // is outside every sleep window.
+                let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity,
+                                                             sleepWindows: nights.flatMap(\.inBedSpans))
                 _ = try store.ingest(owned(gated, timeline), device: timeline)
                 // Hold the watermark where a minute may still pass the gate later (no night yet, or
                 // no wear record this sync), so it is fetched again instead of skipped for good.
@@ -315,7 +319,7 @@ final class HelioStoreSink: HelioHistorySink {
                     proposed: HelioFetchPlan.advancedCursor(previous: previous, round: round, now: now),
                     previous: previous,
                     earliestWearUnknown: HelioSkinTemperatureGate.earliestWearUnknown(temperatures: minutes, activity: activity),
-                    latestNightEnd: windows.map(\.end).max(), now: now)
+                    latestNightEnd: nights.map(\.window.end).max(), now: now)
                 if let held, held != previous { try store.setHelioFetchCursor(.temperature, to: held, device: timeline) }
                 return true
             case .autoStress(let minutes):

@@ -2240,3 +2240,113 @@ extension StrapNightHealthTests {
 }
 
 
+
+// MARK: - Decision 71i: the awake gap of a joined night is no sleep window
+//
+// Three strap-only readers judge a night's in-bed spans (one per fragment) instead of its union
+// window: the skin-temperature gate in the sink, the nightly skin-temperature verdict of
+// `saveHelioNight`, and the night score's overnight HRV (save path and repair pass). A night that
+// wasn't joined has one span, its window, so it is judged exactly as before.
+
+/// `count` 8-byte activity minutes, all worn (kind 0x01, HR 55).
+private func wornMinutes(_ count: Int) -> [UInt8] {
+    (0..<count).flatMap { _ in [UInt8]([0x01, 0x08, 0, 55, 0, 0, 0, 0]) }
+}
+
+/// `count` 8-byte temperature minutes at `centi` hundredths of a °C.
+private func temperatureMinutes(_ count: Int, centi: UInt16) -> [UInt8] {
+    (0..<count).flatMap { _ in [0xff, 0x7f] + le16(centi) + [0x5a, 0x5a, 0x5a, 0x5a] }
+}
+
+extension StrapNightHealthTests {
+    /// A sync delivering `sessions`, then worn activity and skin temperature for every minute from
+    /// 23:00 to 07:00, through the production path. The stored temperature minutes' local hours.
+    private func syncWithTemperatures(_ sessions: [[(Double, Double, UInt8)]], store: LocalStore) throws -> [Date] {
+        clock = hour(9)
+        let device = makeStrap(sessions[0])
+        let from = hour(-1).timeIntervalSince1970
+        device.fetchData[.sleepSession] = (stamp(hour(0).timeIntervalSince1970 - 86_400), sessions.flatMap(session))
+        device.fetchData[.activity] = (stamp(from), wornMinutes(480))
+        device.fetchData[.temperature] = (stamp(from), temperatureMinutes(480, centi: 3350))
+        let transport = Transport(device: device)
+        let keys = Keys()
+        let helio = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
+                                 sink: HelioStoreSink(store: store, observability: observability), findState: HelioFindState(),
+                                 clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
+        transport.session = helio
+        helio.start()
+        transport.drain()
+        XCTAssertEqual(helio.lastSyncResult?.interrupted, false)
+        let kind = MetricKind.temperature.rawValue
+        return try store.context.fetch(FetchDescriptor<StoredSample>(predicate: #Predicate { $0.kindRaw == kind },
+                                                                     sortBy: [SortDescriptor(\.start)])).map(\.start)
+    }
+
+    /// The gate: a temperature minute in the awake gap (03:30) is not kept; one in either fragment
+    /// (01:00, 06:00) is. Over a night that wasn't joined (23:00–07:00), 03:30 is kept as before.
+    func testATemperatureMinuteInTheAwakeGapIsNotGatedIn() throws {
+        try inFixedZoneSync {
+            ownership.install(.strapOwnsAllTime)
+            let joined = try syncWithTemperatures([sleepA, afterTheAwakening], store: try makeStore())
+            XCTAssertTrue(joined.contains(hour(1)), "in the first fragment")
+            XCTAssertTrue(joined.contains(hour(6)), "in the second fragment")
+            XCTAssertFalse(joined.contains(hour(3.5)), "in the awake gap")
+            XCTAssertFalse(joined.contains { $0 >= hour(2) && $0 < hour(5.5) }, "nothing from the gap")
+
+            let single = try syncWithTemperatures([[(-1, 3, light), (3, 7, deep)]], store: try makeStore())
+            XCTAssertTrue(single.contains(hour(3.5)), "a night that wasn't joined: as before")
+            XCTAssertEqual(single.count, 480)
+        }
+    }
+
+    /// The verdict and the overnight HRV, as `finishSync` re-saves the night: readings in the awake gap
+    /// (31 °C, 90 ms) are in neither; the same readings inside a fragment are. A night that wasn't
+    /// joined judges its whole window, as before. The repair pass judges the same spans.
+    func testTemperatureAndHRVInTheAwakeGapAreNotInTheNightsVerdictOrScore() throws {
+        let fragmentHRV: [Double] = [41, 47, 44]
+        let expected = try XCTUnwrap(SleepStress.overnightScore(rmssd: [41, 44, 47]))
+        XCTAssertNotEqual(SleepStress.overnightScore(rmssd: [41, 44, 47, 90]), expected, "the gap's reading would move the score")
+        for joined in [true, false] {
+            try inFixedZoneSync {
+                let label = joined ? "joined" : "not joined"
+                ownership.install(.strapOwnsAllTime)
+                let store = try makeStore()
+                let result = try syncSessions(joined ? [sleepA, afterTheAwakening] : [[(-1, 3, light), (3, 7, deep)]],
+                                              at: hour(9), store: store)
+                let night = try XCTUnwrap(result.nights.first, label)
+                // Every 5 minutes, 23:00–07:00: 34 °C in bed, 31 °C in the joined night's awake gap.
+                let temperatures = stride(from: hour(-1).timeIntervalSince1970, to: hour(7).timeIntervalSince1970, by: 300).map { t in
+                    let time = Date(timeIntervalSince1970: t)
+                    let inGap = time > hour(2) && time < hour(5.5)
+                    return QuantitySample(kind: .temperature, start: time, value: inGap ? 31 : 34)
+                }
+                _ = try store.ingest(temperatures, device: timeline)
+                let hrv = zip([hour(0), hour(1), hour(6)], fragmentHRV).map { QuantitySample(kind: .hrvSDNN, start: $0, value: $1) }
+                    + [QuantitySample(kind: .hrvSDNN, start: hour(3.5), value: 90)]
+                _ = try store.ingest(hrv, device: timeline)
+
+                XCTAssertEqual(try store.saveHelioNight(night, device: timeline), .updated, label)
+                let row = try XCTUnwrap(try rows(store).first, label)
+                let allTemps = temperatures.map(\.value)
+                if joined {
+                    XCTAssertEqual(row.skinTempC, 34, accuracy: 1e-9, "\(label): the gap's 31 °C is not in the mean")
+                    XCTAssertEqual(row.stressScore, expected, "\(label): the gap's HRV is not in the score")
+                } else {
+                    XCTAssertEqual(row.skinTempC, allTemps.reduce(0, +) / Double(allTemps.count), accuracy: 1e-9, label)
+                    XCTAssertEqual(row.stressScore, SleepStress.overnightScore(rmssd: [41, 44, 47, 90]), label)
+                }
+
+                // The repair pass, for both of its branches (both scores missing; only the stress score).
+                let stress = row.stressScore
+                for clearSleepScore in [true, false] {
+                    row.stressScore = 0
+                    if clearSleepScore { row.sleepScore = 0 }
+                    try store.context.save()
+                    _ = try store.scoreUnscoredHelioNights()
+                    XCTAssertEqual(try XCTUnwrap(try rows(store).first).stressScore, stress,
+                                   "\(label): the repair pass judges the same spans (sleep score cleared: \(clearSleepScore))")
+                }
+            }
+        }
+    }
+}

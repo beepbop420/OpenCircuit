@@ -222,6 +222,33 @@ public enum HelioSkinTemperatureGate {
             .sorted { $0.time < $1.time }
             .compactMap { minute in minute.celsius.map { QuantitySample(kind: .temperature, start: minute.time, value: $0) } }
     }
+
+    /// Decision 71i (#278): a strap night's nightly skin-temperature verdict, judged over its in-bed
+    /// spans (`HelioSleepSelection.Night.inBedSpans`), never over the awake gap of a joined night.
+    /// `SkinTempBaseline.nightlyVerdict` (shared with the ring, unchanged) over each span's hour-long
+    /// buckets: a reading counts in the first span that contains it, the count is over those
+    /// readings, and the coverage is the hit buckets over every span's buckets. One span (a night
+    /// that wasn't joined) is exactly `SkinTempBaseline.nightlyVerdict(samples:in:)` over it.
+    public static func nightlyVerdict(samples: [TemperatureSample], inBedSpans spans: [DateInterval],
+                                      minSamples: Int = SkinTempBaseline.minNightlySamples,
+                                      minCoverage: Double = SkinTempBaseline.minNightlyCoverage) -> SkinTempBaseline.NightlyVerdict {
+        guard spans.count > 1 else {
+            guard let span = spans.first else { return .notMeasured }
+            return SkinTempBaseline.nightlyVerdict(samples: samples, in: span, minSamples: minSamples, minCoverage: minCoverage)
+        }
+        var inSpans: [TemperatureSample] = []
+        var hit: Set<[Int]> = []
+        for sample in samples {
+            guard let index = spans.firstIndex(where: { $0.contains(sample.time) }) else { continue }
+            inSpans.append(sample)
+            hit.insert([index, Int(sample.time.timeIntervalSince(spans[index].start) / 3600)])
+        }
+        guard inSpans.count >= max(1, minSamples) else { return .notMeasured }
+        let buckets = spans.reduce(0) { $0 + max(1, Int(($1.duration / 3600).rounded(.up))) }
+        let coverage = Double(hit.count) / Double(buckets)
+        guard minCoverage <= 0 || coverage >= minCoverage else { return .rejectedCoverage(coverage) }
+        return .published(inSpans.map(\.celsius).reduce(0, +) / Double(inSpans.count))
+    }
 }
 
 // MARK: - Sleep-stage selection (decision 13)
@@ -263,6 +290,11 @@ public enum HelioSleepSelection {
             self.recordedTimeZone = recordedTimeZone
         }
 
+        /// Decision 71i (#278): the spans the night was in bed, one per fragment (`HelioSleepSelection
+        /// .inBedSpans(of:window:)`). The awake gap of a joined night is in none of them; a night that
+        /// wasn't joined has one, its window.
+        public var inBedSpans: [DateInterval] { HelioSleepSelection.inBedSpans(of: segments, window: window) }
+
         /// The calendar to judge this night in (decision 28e, review-224d S-2): the phone's calendar
         /// in the zone the night was RECORDED in, never the zone the phone is in at sync time.
         public var recordedCalendar: Calendar {
@@ -270,6 +302,18 @@ public enum HelioSleepSelection {
             if let recordedTimeZone { calendar.timeZone = recordedTimeZone }
             return calendar
         }
+    }
+
+    /// Decision 71i (#278): the in-bed spans of a strap night's `segments`, oldest first: its `.inBed`
+    /// segments (one per fragment, never overlapping, decision 70j), or `window` when it has none (a
+    /// row stored before decision 70). The strap-only readers that judge a night's time (the skin
+    /// temperature gate and verdict, the overnight HRV) take these, never the union window, whose
+    /// awake gap is no sleep.
+    public static func inBedSpans(of segments: [SleepSegment], window: DateInterval) -> [DateInterval] {
+        let spans = segments.filter { $0.stage == .inBed && $0.end > $0.start }
+            .map { DateInterval(start: $0.start, end: $0.end) }
+            .sorted { $0.start < $1.start }
+        return spans.isEmpty ? [window] : spans
     }
 
     /// The fixed-offset zone whose local midnight is `midnight` (the strap's own reference).

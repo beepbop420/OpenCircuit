@@ -190,4 +190,50 @@ final class HelioMidNightWakeTests: XCTestCase {
         XCTAssertEqual(kept.first.map(inBeds), [span(1380, 1560), span(1560, 1860)])
         XCTAssertEqual(kept.first?.window, span(1380, 1860))
     }
+
+    // MARK: 71i: the awake gap is no sleep window
+
+    /// A joined night's in-bed spans are its fragments; a night that wasn't joined has one, its window;
+    /// segments with no `.inBed` (a row stored before decision 70) fall back to the window.
+    func testTheInBedSpansOfAJoinedNightLeaveTheGapOut() throws {
+        let joined = try XCTUnwrap(try nights([sleepRecord([(1380, 1560, light)]), sleepRecord([(1740, 1860, deep)])], now: morning).first)
+        XCTAssertEqual(joined.inBedSpans, [span(1380, 1560), span(1740, 1860)])
+        let single = try XCTUnwrap(try nights([sleepRecord([(1380, 1860, light)])], now: morning).first)
+        XCTAssertEqual(single.inBedSpans, [single.window])
+        let stagesOnly = [SleepSegment(start: at(1380), end: at(1860), stage: .asleepCore)]
+        XCTAssertEqual(Selection.inBedSpans(of: stagesOnly, window: span(1380, 1860)), [span(1380, 1860)])
+    }
+
+    /// One reading every 5 minutes at `celsius` from `from` to `to` (minutes).
+    private func readings(_ from: Int, _ to: Int, celsius: Double) -> [TemperatureSample] {
+        stride(from: from, to: to, by: 5).map { TemperatureSample(time: at($0), celsius: celsius) }
+    }
+
+    /// The verdict over the fragments: readings in the awake gap are not in it, and the gap's empty
+    /// hours don't count against the coverage. Over one span it is `SkinTempBaseline.nightlyVerdict`.
+    func testTheSkinTemperatureVerdictIsJudgedOverTheFragments() {
+        let fragments = [span(1380, 1560), span(1740, 1860)]                 // 23:00–02:00, 05:00–07:00
+        let asleep = readings(1380, 1560, celsius: 34) + readings(1740, 1860, celsius: 34)
+        let gap = readings(1565, 1740, celsius: 31)                         // 02:05–04:55
+        XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: asleep + gap, inBedSpans: fragments), .published(34),
+                       "the gap's readings are not in the mean")
+        XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: asleep, inBedSpans: fragments), .published(34),
+                       "the gap's empty hours are no missing coverage")
+        // Two-hour fragments four hours apart: published over them, withheld over the union (4 of 8 hours).
+        let shortAsleep = readings(1380, 1500, celsius: 34) + readings(1740, 1860, celsius: 34)
+        XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: shortAsleep, inBedSpans: [span(1380, 1500), span(1740, 1860)]),
+                       .published(34))
+        XCTAssertEqual(SkinTempBaseline.nightlyVerdict(samples: shortAsleep, in: span(1380, 1860)), .rejectedCoverage(0.5))
+        // Too few in the fragments: not measured, whatever the gap holds.
+        XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: Array(asleep.prefix(3)) + gap, inBedSpans: fragments), .notMeasured)
+        // Half the hours of each fragment empty: withheld.
+        let thin = readings(1380, 1440, celsius: 34) + readings(1740, 1800, celsius: 34)
+        XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: thin, inBedSpans: fragments), .rejectedCoverage(2.0 / 5))
+
+        let window = span(1380, 1860)
+        for samples in [readings(1380, 1860, celsius: 33.5), readings(1380, 1500, celsius: 33.5), Array(readings(1380, 1860, celsius: 33.5).prefix(4))] {
+            XCTAssertEqual(HelioSkinTemperatureGate.nightlyVerdict(samples: samples, inBedSpans: [window]),
+                           SkinTempBaseline.nightlyVerdict(samples: samples, in: window), "one span: the shared verdict")
+        }
+    }
 }
