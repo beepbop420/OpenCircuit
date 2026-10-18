@@ -89,14 +89,53 @@ extension HelioSleepSelection {
     /// stitched together by the one rule (`stitch`: 28f's 60 minutes, 71b's overnight sleeps of one
     /// night key), and a night is kept only when it holds a session; a block that stands alone, or with
     /// other blocks only, is dropped. Without blocks this is `stitch(sessions)`, unchanged.
+    ///
+    /// Decision 73f: no lead-in from activity minutes. A block is used only when it lies entirely after
+    /// the in-bed end of a session of the night it joins; any other block is taken out and the rest is
+    /// stitched again, until every block left qualifies. (Once the night is written, later syncs no
+    /// longer fetch a block before the record, so the next extension's union delete would remove a
+    /// written lead-in from Apple Health.)
+    ///
+    /// Decision 73g: a block never costs a night. A night holding blocks that is no overnight sleep
+    /// (`overnightVerdict`, 28c/28d) or is longer than `maxNightLength`, while the stitch of its sessions
+    /// alone has an overnight sleep, is replaced by that stitch, and its blocks are counted alone. So the
+    /// nights kept with blocks cover every night kept without them, each at least as wide.
     public static func nights(sessions: [Night], activityBlocks blocks: [Night]) -> ActivityJoin {
         guard !blocks.isEmpty else { return ActivityJoin(nights: stitch(sessions), joinedBlocks: 0, aloneBlocks: 0) }
         func holds(_ night: Night, _ sleep: Night) -> Bool {
             let start = stageSpan(of: sleep).start
             return night.window.start <= start && start < night.window.end
         }
-        let kept = stitch(sessions + blocks).filter { night in sessions.contains { holds(night, $0) } }
-        let joined = blocks.filter { block in kept.contains { holds($0, block) } }.count
+        func withSession(_ nights: [Night]) -> [Night] {
+            nights.filter { night in sessions.contains { holds(night, $0) } }
+        }
+        // 73f: drop every block that isn't after a session's in-bed end in its night, then stitch again.
+        var used = blocks
+        var kept = withSession(stitch(sessions + used))
+        while true {
+            let leadIns = used.filter { block in
+                guard let night = kept.first(where: { holds($0, block) }) else { return false }
+                return !sessions.contains { holds(night, $0) && $0.window.end <= block.window.start }
+            }
+            guard !leadIns.isEmpty else { break }
+            used.removeAll { block in leadIns.contains(block) }
+            kept = withSession(stitch(sessions + used))
+        }
+        // 73g: a night its blocks would cost goes back to its sessions' own stitch.
+        var joined = 0
+        kept = kept.flatMap { night -> [Night] in
+            let held = used.filter { holds(night, $0) }.count
+            guard held > 0, !isOvernightSleep(night) || night.window.duration > maxNightLength else {
+                joined += held
+                return [night]
+            }
+            let alone = stitch(sessions.filter { holds(night, $0) })
+            guard alone.contains(where: isOvernightSleep) else {
+                joined += held
+                return [night]
+            }
+            return alone
+        }
         return ActivityJoin(nights: kept, joinedBlocks: joined, aloneBlocks: blocks.count - joined)
     }
 }
