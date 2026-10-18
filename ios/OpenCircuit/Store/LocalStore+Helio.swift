@@ -364,12 +364,31 @@ final class HelioStoreSink: HelioHistorySink {
     /// let a doze from before a ring → strap switch drag the strap's own night into ring time, and then
     /// neither device kept it. Used by `storeNights` and the temperature gate. With an empty log (a
     /// ring-only install) nothing is the strap's, as before.
+    ///
+    /// Decision 73 (#278): this sync's activity sleep blocks (the strap's kind-sleep minutes outside every
+    /// staged session) are stitched in like raw sleeps, each kept only when the strap owns its own window
+    /// (71d), and a block is used only when it joins a night that holds a session (73c): one standing
+    /// alone never reaches `storeNights`, `storeNaps` or the temperature gate. With no activity minutes
+    /// (no activity round, or it failed) this is the sessions' stitch, as before.
     private func ownedNights(timeline: SyncDeviceID, now: Date) -> [HelioSleepSelection.Night] {
+        ownedSleep(timeline: timeline, now: now).nights
+    }
+
+    /// `ownedNights` with the decision-73c counts.
+    private func ownedSleep(timeline: SyncDeviceID, now: Date) -> HelioSleepSelection.ActivityJoin {
         let log = LocalStore.ownershipLog()
         let family = DeviceOwnershipLog.Family(timeline: timeline)
-        let own = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+        let staged = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+        let blocks = HelioSleepSelection.activityBlocks(from: activity, sessions: staged, now: now)
             .filter { log.owner(ofNightFrom: $0.window.start, to: $0.window.end) == family }
-        return HelioSleepSelection.stitch(own)
+        return HelioSleepSelection.nights(sessions: ownedSessions(staged, timeline: timeline), activityBlocks: blocks)
+    }
+
+    /// The staged sessions the strap owns, each judged on its own window (decision 28a/71d).
+    private func ownedSessions(_ staged: [HelioSleepSelection.Night], timeline: SyncDeviceID) -> [HelioSleepSelection.Night] {
+        let log = LocalStore.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
+        return staged.filter { log.owner(ofNightFrom: $0.window.start, to: $0.window.end) == family }
     }
 
     private func storeNights(timeline: SyncDeviceID, now: Date) throws {
@@ -649,9 +668,13 @@ final class HelioStoreSink: HelioHistorySink {
         // Distinct records and sessions: a record the strap sends in two rounds is one record.
         summary.records = Set(sessions.map { DateInterval(start: $0.sleepStart, end: max($0.sleepStart, $0.sleepEnd)) }).count
         summary.staged = Set(staged.map(\.window)).count
-        let nights = ownedNights(timeline: timeline, now: now)
+        // 72a's nights and joined counts are the sessions' own (raw sessions, no activity block).
+        let nights = HelioSleepSelection.stitch(ownedSessions(staged, timeline: timeline))
         summary.nights = nights.count
         summary.joinedSessions = nights.map(\.inBedSpans.count).filter { $0 > 1 }.reduce(0, +)
+        let join = ownedSleep(timeline: timeline, now: now)
+        summary.activityBlocksJoined = join.joinedBlocks
+        summary.activityBlocksAlone = join.aloneBlocks
         for outcome in nightOutcomes.values { summary.outcomes[outcome, default: 0] += 1 }
         summary.keptOut58b = keptApartLogged.count
         summary.napsStored = napsStoredWindows.count

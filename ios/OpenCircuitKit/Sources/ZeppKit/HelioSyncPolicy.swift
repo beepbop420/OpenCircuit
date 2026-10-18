@@ -276,13 +276,14 @@ public enum HelioSleepSelection {
         public let segments: [SleepSegment]
         /// The union of the sessions' in-bed spans: the first `.inBed` start … the last `.inBed` end.
         public let window: DateInterval
-        /// The strap's own sleep score, kept for display. Not OpenCircuit's composite score.
-        public let strapScore: UInt8
+        /// The strap's own sleep score, kept for display. Not OpenCircuit's composite score. nil for a
+        /// sleep with no session record (an activity sleep block, decision 73b).
+        public let strapScore: UInt8?
         /// The time zone the night was recorded in, from the strap's local-midnight reference
         /// (`ZeppSleepSession.midnightReference`). nil when unknown; then the phone's zone is used.
         public let recordedTimeZone: TimeZone?
 
-        public init(segments: [SleepSegment], window: DateInterval, strapScore: UInt8,
+        public init(segments: [SleepSegment], window: DateInterval, strapScore: UInt8?,
                     recordedTimeZone: TimeZone? = nil) {
             self.segments = segments
             self.window = window
@@ -481,7 +482,8 @@ public enum HelioSleepSelection {
     }
 
     /// Two sessions as one night: both segment lists as reported (each with its own `.inBed` segment,
-    /// decision 70b), the window spanning both, the longer session's score and the first's recorded zone.
+    /// decision 70b), the window spanning both, the longer session's score (the other's when the longer
+    /// has none, an activity block, decision 73b) and the first's recorded zone.
     ///
     /// Decision 70j: one `.inBed` per fragment, never overlapping, both halves kept. When the earlier
     /// fragment's `.inBed` overlaps the later one's, the later one starts where the earlier ends; if that
@@ -510,8 +512,9 @@ public enum HelioSleepSelection {
         } else {
             window = DateInterval(start: first.window.start, end: second.window.end)
         }
+        let (longer, shorter) = second.window.duration > first.window.duration ? (second, first) : (first, second)
         return Night(segments: segments, window: window,
-                     strapScore: second.window.duration > first.window.duration ? second.strapScore : first.strapScore,
+                     strapScore: longer.strapScore ?? shorter.strapScore,
                      recordedTimeZone: first.recordedTimeZone ?? second.recordedTimeZone)
     }
 

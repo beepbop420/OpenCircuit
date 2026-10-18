@@ -25,6 +25,10 @@ struct StrapSleepRoundSummary: Equatable {
     /// 72b: `0x01` minutes of kind sleep (`0x78`) in the 24 h before the sync that lie outside every
     /// staged session's in-bed span.
     var activitySleepMinutesOutsideSessions = 0
+    /// Decision 73c: the activity sleep blocks this sync judged (not one still in progress, 73d) that
+    /// joined a session's night, and those that would have stood alone and were used nowhere.
+    var activityBlocksJoined = 0
+    var activityBlocksAlone = 0
 
     /// The one breadcrumb line. Digits only; no clock time.
     var text: String {
@@ -39,5 +43,8 @@ struct StrapSleepRoundSummary: Equatable {
             + "naps: stored=\(napsStored) unsettled=\(napsUnsettled) tooShort=\(napsTooShort); "
             + "endsAfterNewestNight=\(endsAfterNewestNight); "
             + "activity sleep min outside sessions (24 h)=\(activitySleepMinutesOutsideSessions)"
+            // Only when there was a block, so a sync without one leaves the line decision 72 shipped.
+            + (activityBlocksJoined + activityBlocksAlone > 0
+                ? "; activity blocks: joined=\(activityBlocksJoined) alone=\(activityBlocksAlone)" : "")
     }
 }
