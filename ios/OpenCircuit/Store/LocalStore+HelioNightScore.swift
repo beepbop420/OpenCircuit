@@ -67,7 +67,8 @@ extension LocalStore {
             segments: segments,
             heartRate: helioHeartRate(in: window, device: device),
             // Decision 71i: the HRV of the night's in-bed spans, never of a joined night's awake gap.
-            rmssd: helioRMSSD(in: window, sleepSpans: HelioSleepSelection.inBedSpans(of: segments, window: window),
+            // Decision 74c: its sleep fragments' spans, never an awake run of the fill.
+            rmssd: helioRMSSD(in: window, sleepSpans: HelioSleepSelection.sleepSpans(of: segments, window: window),
                               device: device),
             // The verdict the caller just reached for THIS night (0 = none or withheld), so the
             // score and the stored temperature always describe the same judgement.
@@ -160,8 +161,9 @@ extension LocalStore {
             let window = DateInterval(start: row.inBedStart, end: row.inBedEnd)
             let segments = SleepHypnogramCodec.decode(row.hypnogramData)
             // Decision 71i: the same in-bed spans the save path judges (one, the window, for a night
-            // that wasn't joined or was stored before decision 70).
-            let sleepSpans = HelioSleepSelection.inBedSpans(of: segments, window: window)
+            // that wasn't joined or was stored before decision 70). Decision 74c: the sleep fragments'
+            // spans, never an awake run of the fill.
+            let sleepSpans = HelioSleepSelection.sleepSpans(of: segments, window: window)
             let needsSleep = row.sleepScore == 0
             let scores: StoredNightScore.Scores
             if needsSleep {

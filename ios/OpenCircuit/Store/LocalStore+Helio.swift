@@ -134,7 +134,8 @@ extension LocalStore {
         extras.hypnogram = segments
         let temperatures = helioTemperatures(in: window, device: device)
         // Decision 71i: judged over the night's in-bed spans, so a joined night's awake gap is no sleep.
-        switch HelioSkinTemperatureGate.nightlyVerdict(samples: temperatures, inBedSpans: night.inBedSpans) {
+        // Decision 74c: its sleep fragments' spans, never an awake run of the fill.
+        switch HelioSkinTemperatureGate.nightlyVerdict(samples: temperatures, inBedSpans: night.sleepSpans) {
         case .published(let mean): extras.skinTempC = mean
         case .rejectedCoverage: extras.skinTempWithheld = true
         case .notMeasured: break
@@ -203,6 +204,32 @@ extension LocalStore {
                     asleepMin: Int((SleepStaging.totalAsleep(nap.segments) / 60).rounded()),
                     isLongNap: nap.window.duration >= NapDetection.longNapDuration,
                     segments: nap.segments, family: .zeppOS)
+    }
+
+    /// Decision 74 (#278): `segments` (a strap night over `window`) with the awake time between its
+    /// fragments filled from the STORED heart rate (`HelioSleepSelection.awakeFilled`): `device`'s own
+    /// `.heartRate` rows in `window`, for time `device` owns (decision 28). Never a sync's fetched
+    /// minutes (74b), so the night stored by a sync, the one handed to its flush and the one the 50b
+    /// backstop rebuilds from the stored hypnogram are the same segments, whatever each sync fetched.
+    /// A night with one fragment is returned as it is, and nothing is read.
+    func helioAwakeFilled(_ segments: [SleepSegment], window: DateInterval, device: SyncDeviceID) -> [SleepSegment] {
+        guard HelioSleepSelection.inBedSpans(of: segments, window: window).count > 1 else { return segments }
+        let kindRaw = MetricKind.heartRate.rawValue
+        let deviceID = device.rawValue
+        let start = window.start
+        let end = window.end
+        let descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start >= start && $0.start < end && $0.value > 0 },
+            sortBy: [SortDescriptor(\.start)])
+        let log = Self.ownershipLog()
+        let minutes = ((try? context.fetch(descriptor)) ?? []).map(\.start).filter { log.owns(device, at: $0) }
+        return HelioSleepSelection.awakeFilled(segments, window: window, heartRateMinutes: minutes)
+    }
+
+    /// `helioAwakeFilled` for a staged night: its window, score and recorded zone are unchanged.
+    func helioAwakeFilled(_ night: HelioSleepSelection.Night, device: SyncDeviceID) -> HelioSleepSelection.Night {
+        HelioSleepSelection.Night(segments: helioAwakeFilled(night.segments, window: night.window, device: device),
+                                  window: night.window, strapScore: night.strapScore, recordedTimeZone: night.recordedTimeZone)
     }
 
     /// `device`'s stored skin temperatures in `window` (already gated when stored).
@@ -318,9 +345,10 @@ final class HelioStoreSink: HelioHistorySink {
             case .temperature(let minutes):
                 let nights = ownedNights(timeline: timeline, now: now)
                 // Decision 71i: each night's in-bed spans, so a minute in a joined night's awake gap
-                // is outside every sleep window.
+                // is outside every sleep window. Decision 74c: its sleep fragments' spans, never an
+                // awake run.
                 let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity,
-                                                             sleepWindows: nights.flatMap(\.inBedSpans))
+                                                             sleepWindows: nights.flatMap(\.sleepSpans))
                 _ = try store.ingest(owned(gated, timeline), device: timeline)
                 // Hold the watermark where a minute may still pass the gate later (no night yet, or
                 // no wear record this sync), so it is fetched again instead of skipped for good.
@@ -437,9 +465,13 @@ final class HelioStoreSink: HelioHistorySink {
         }
         // The ownership check again, on the stitched window: a backstop (`ownedNights` already kept
         // only the strap's own sleeps).
-        for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
-        where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
-            && !storedNights.contains(where: { $0.window == night.window }) {
+        for staged in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
+        where log.owner(ofNightFrom: staged.window.start, to: staged.window.end) == family
+            && !storedNights.contains(where: { $0.window == staged.window }) {
+            // Decision 74 (#278): the awake time between the night's fragments, from the stored heart
+            // rate (the activity round, which ingests it, runs before this sleep round). Inside the
+            // window, so every window rule below judges the night exactly as before.
+            let night = store.helioAwakeFilled(staged, device: timeline)
             // Decision 28f stitches sessions 60 min or less apart into one night, and decision 71b
             // (#278) the overnight sleeps of one night key whatever the gap, so a night can grow after
             // it was written to Apple Health (back to bed after a mid-night awakening, after the Sleep
@@ -591,7 +623,8 @@ final class HelioStoreSink: HelioHistorySink {
         })
         var held: [HelioSleepSelection.Night] = []
         for incoming in keptFullerNights {
-            guard let pick = heldForHealth(incoming, family: family, now: now), keys.insert(pick.key).inserted else { continue }
+            guard let pick = heldForHealth(incoming, timeline: timeline, family: family, now: now),
+                  keys.insert(pick.key).inserted else { continue }
             held.append(pick.night)
         }
         return held
@@ -612,8 +645,9 @@ final class HelioStoreSink: HelioHistorySink {
     /// - the strap's re-delivered copy has settled as well: the margin is judged on the LATER of the
     ///   two ends, so a stored row that ends early is never sent while the night is still going on.
     /// The strap's score and recorded zone come from the incoming night; the window is the stored
-    /// segments' span.
-    private func heldForHealth(_ incoming: HelioSleepSelection.Night, family: DeviceOwnershipLog.Family,
+    /// segments' span. The segments carry the awake fill from the stored heart rate (decision 74), as
+    /// the store path and the 50b backstop give them.
+    private func heldForHealth(_ incoming: HelioSleepSelection.Night, timeline: SyncDeviceID, family: DeviceOwnershipLog.Family,
                                now: Date) -> (night: HelioSleepSelection.Night, key: Date)? {
         guard let row = try? store.sleepSummaryOverlapping(start: incoming.window.start, end: incoming.window.end),
               !row.isManuallyEdited,
@@ -626,7 +660,8 @@ final class HelioStoreSink: HelioHistorySink {
             guard LocalStore.strapNightExtends(DateInterval(start: start, end: end), written: written),
                   StrapNightDeclinedOverlay.load(storedNight: row.night) != row.hypnogramData else { return nil }
         }
-        return (HelioSleepSelection.Night(segments: segments, window: DateInterval(start: start, end: end),
+        let window = DateInterval(start: start, end: end)
+        return (HelioSleepSelection.Night(segments: store.helioAwakeFilled(segments, window: window, device: timeline), window: window,
                                           strapScore: incoming.strapScore, recordedTimeZone: incoming.recordedTimeZone),
                 row.night)
     }

@@ -1,6 +1,7 @@
 import Foundation
 import OpenCircuitKit
 import SwiftData
+import ZeppKit
 
 // Decision 50b (#253): the backstop that offers a stored strap night to Apple Health when no sync's
 // flush carried it. A sync hands a night to its flush only through `HelioSyncResult.nights`, which
@@ -47,6 +48,8 @@ extension LocalStore {
     /// - it has no Health mirror record for its key, in the zone it was stored in or the current one,
     ///   or its stored segments extend the record's span (decision 58e, `storedNightAwaitsHealth`);
     /// - the writer hasn't declined this exact stored hypnogram (#259);
+    /// The segments offered carry the awake fill from `timeline`'s stored heart rate (decision 74,
+    /// `helioAwakeFilled`), so they are the segments the sync's own store path gives the night.
     /// - it began within `strapNightHealthLookback` of `now`;
     /// - a LATER stored night (any device, keyed no later than `now`, #259) exists, or, for the
     ///   newest night itself (decision 57), more than `strapNewestNightHealthBuffer` (3 h) has passed
@@ -74,9 +77,13 @@ extension LocalStore {
             sortBy: [SortDescriptor(\.night, order: .forward)])
         return ((try? context.fetch(descriptor)) ?? []).compactMap { row in
             guard let segments = strapSegmentsAwaitingHealth(row, log: log, family: family) else { return nil }
-            if row.night < newest { return segments }
             let end = max(row.inBedEnd, segments.map(\.end).max() ?? row.inBedEnd)
-            return now.timeIntervalSince(end) > Self.strapNewestNightHealthBuffer ? segments : nil
+            guard row.night < newest || now.timeIntervalSince(end) > Self.strapNewestNightHealthBuffer else { return nil }
+            // Decision 74 (#278): the night as the store path gives it, with its awake fill from the
+            // stored heart rate (a row a build before 74 stored has none). Inside the segments' span.
+            guard let start = segments.map(\.start).min() else { return segments }
+            return helioAwakeFilled(segments, window: DateInterval(start: start, end: segments.map(\.end).max() ?? start),
+                                    device: timeline)
         }
     }
 
@@ -162,7 +169,10 @@ extension LocalStore {
               let row = try? sleepSummaryOverlapping(start: start, end: end),
               !row.hypnogramData.isEmpty,
               storedNightAwaitsHealth(storedNight: row.night, window: DateInterval(start: start, end: end)),
-              SleepHypnogramCodec.decode(row.hypnogramData) == segments else { return }
+              // Decision 74: the backstop offers the stored hypnogram with its awake fill, so the two
+              // are compared without it (a night with no fill: exactly as before).
+              HelioSleepSelection.withoutAwakeFill(SleepHypnogramCodec.decode(row.hypnogramData))
+                == HelioSleepSelection.withoutAwakeFill(segments) else { return }
         StrapNightDeclinedOverlay.save(row.hypnogramData, storedNight: row.night)
     }
 }

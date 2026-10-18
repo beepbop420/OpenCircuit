@@ -137,4 +137,60 @@ final class HelioAwakeFillTests: XCTestCase {
         XCTAssertEqual(filledNight.strapScore, 80)
         XCTAssertEqual(Selection.sleepSpans(of: [], window: window), [window], "no in-bed layer: the window, as before")
     }
+
+    /// Decision 74b: the activity round, which stores the heart rate the fill reads, comes before the
+    /// sleep round in every sync.
+    func testTheActivityRoundRunsBeforeTheSleepRound() throws {
+        let types = HelioFetchPlan.types
+        let activity = try XCTUnwrap(types.firstIndex(of: .activity))
+        let sleep = try XCTUnwrap(types.firstIndex(of: .sleepSession))
+        XCTAssertLessThan(activity, sleep)
+    }
+
+    /// Decision 74c: the resting HR of the night score reads only asleep segments, so a run's awake
+    /// heart rate (70 bpm here, 50 asleep) never moves it.
+    func testTheRestingHeartRateIsTheSameWithTheFill() {
+        let hr = (1380..<1860).map { m in
+            HRSample(bpm: (1560..<1770).contains(m) ? 70 : 50, start: at(m), end: at(m + 1))
+        }
+        let out = filled(worn(1560, 1770))
+        let before = StoredNightScore.scores(.init(segments: joined, heartRate: hr))
+        let after = StoredNightScore.scores(.init(segments: out, heartRate: hr))
+        XCTAssertEqual(after.restingHR, before.restingHR)
+        XCTAssertEqual(after.restingHR, 50)
+    }
+
+    /// Decision 74e: the fill is real awake time in bed, so efficiency and the Sleep Score drop. A
+    /// night shaped like the owner's (rounded): 23:30–03:00 asleep but for 10 min awake at its end, worn
+    /// and awake 03:00–05:30, asleep 05:30–07:30 (an activity block's generic sleep). Build 82 judged
+    /// it on its fragments alone; this build adds the 150 awake minutes. The line printed is the PR's
+    /// master vs branch table.
+    func testTheOwnersShapedNightLosesEfficiencyAndScoreToItsAwakeTime() throws {
+        let night: [SleepSegment] = [
+            SleepSegment(start: at(1410), end: at(1620), stage: .inBed),
+            SleepSegment(start: at(1410), end: at(1500), stage: .asleepCore),
+            SleepSegment(start: at(1500), end: at(1560), stage: .asleepDeep),
+            SleepSegment(start: at(1560), end: at(1610), stage: .asleepREM),
+            SleepSegment(start: at(1610), end: at(1620), stage: .awake),
+            SleepSegment(start: at(1770), end: at(1890), stage: .inBed),
+            SleepSegment(start: at(1770), end: at(1890), stage: Selection.activityBlockStage),
+        ]
+        let out = Selection.awakeFilled(night, window: span(1410, 1890), heartRateMinutes: worn(1410, 1890))
+        let hr = (1410..<1890).map { m in HRSample(bpm: (1620..<1770).contains(m) ? 68 : 52, start: at(m), end: at(m + 1)) }
+        func row(_ label: String, _ segments: [SleepSegment]) -> (Double, Int) {
+            let s = SleepStaging.summary(segments)
+            let scores = StoredNightScore.scores(.init(segments: segments, heartRate: hr, rmssd: [40, 44, 48]))
+            print("74e \(label): in bed \(s.minutes.inBed) min, asleep \(s.minutes.asleep) min, awake \(s.minutes.awake) min, "
+                  + "efficiency \(Int((s.efficiency * 100).rounded()))%, sleep score \(scores.sleepScore.map(String.init) ?? "nil"), "
+                  + "resting HR \(scores.restingHR.map { String(Int($0)) } ?? "nil"), overnight stress \(scores.stressScore.map(String.init) ?? "nil")")
+            return (s.efficiency, scores.sleepScore ?? 0)
+        }
+        let master = row("master (build 82)", night)
+        let branch = row("branch", out)
+        XCTAssertEqual(SleepStaging.summary(night).minutes.inBed, 330)
+        XCTAssertEqual(SleepStaging.summary(out).minutes.inBed, 480)
+        XCTAssertEqual(SleepStaging.summary(out).minutes.asleep, SleepStaging.summary(night).minutes.asleep)
+        XCTAssertLessThan(branch.0, master.0, "efficiency drops")
+        XCTAssertLessThan(branch.1, master.1, "the Sleep Score drops")
+    }
 }
