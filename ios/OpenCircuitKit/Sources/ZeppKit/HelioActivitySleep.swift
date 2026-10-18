@@ -90,11 +90,12 @@ extension HelioSleepSelection {
     /// night key), and a night is kept only when it holds a session; a block that stands alone, or with
     /// other blocks only, is dropped. Without blocks this is `stitch(sessions)`, unchanged.
     ///
-    /// Decision 73f: no lead-in from activity minutes. A block is used only when it lies entirely after
-    /// the in-bed end of a session of the night it joins; any other block is taken out and the rest is
-    /// stitched again, until every block left qualifies. (Once the night is written, later syncs no
-    /// longer fetch a block before the record, so the next extension's union delete would remove a
-    /// written lead-in from Apple Health.)
+    /// Decision 73f/73i: no lead-in, and nothing between fragments. A block is used only when it starts
+    /// at or after the in-bed end of the LAST session of the night it joins; any other block is taken out
+    /// and the rest is stitched again, until every block left qualifies. That is where the next sync's
+    /// activity re-fetch starts (the temperature watermark, held at the session nights' end), so every
+    /// block that is ever written is fetched again by every later sync and no extension's union delete
+    /// can remove it. A block before or between a night's records would not be fetched again.
     ///
     /// Decision 73g: a block never costs a night. A night holding blocks that is no overnight sleep
     /// (`overnightVerdict`, 28c/28d) or is longer than `maxNightLength`, while the stitch of its sessions
@@ -109,16 +110,17 @@ extension HelioSleepSelection {
         func withSession(_ nights: [Night]) -> [Night] {
             nights.filter { night in sessions.contains { holds(night, $0) } }
         }
-        // 73f: drop every block that isn't after a session's in-bed end in its night, then stitch again.
+        // 73f/73i: drop every block that doesn't start after its night's last session, then stitch again.
         var used = blocks
         var kept = withSession(stitch(sessions + used))
         while true {
-            let leadIns = used.filter { block in
+            let misplaced = used.filter { block in
                 guard let night = kept.first(where: { holds($0, block) }) else { return false }
-                return !sessions.contains { holds(night, $0) && $0.window.end <= block.window.start }
+                guard let lastEnd = sessions.filter({ holds(night, $0) }).map(\.window.end).max() else { return true }
+                return block.window.start < lastEnd
             }
-            guard !leadIns.isEmpty else { break }
-            used.removeAll { block in leadIns.contains(block) }
+            guard !misplaced.isEmpty else { break }
+            used.removeAll { block in misplaced.contains(block) }
             kept = withSession(stitch(sessions + used))
         }
         // 73g: a night its blocks would cost goes back to its sessions' own stitch.

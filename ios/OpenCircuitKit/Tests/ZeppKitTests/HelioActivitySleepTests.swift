@@ -241,30 +241,45 @@ final class HelioActivitySleepTests: XCTestCase {
         XCTAssertEqual(join.aloneBlocks, 1)
     }
 
-    /// Decision 73h: a separate evening session (20:00–21:00), a block 21:30–22:30, the night 23:00–07:00.
-    /// The block lies after the evening session's end, so 73f lets it join that session (28f, 30 min),
-    /// and the night starts 30 min after the block, so 28f joins it too: one night 20:00–07:00 (an
-    /// overnight sleep, so 73g keeps it, and it covers the record's night). Without the evening session
-    /// the same block is a lead-in of the night and stays alone.
-    func testABlockAfterAnEveningSessionBridgesItIntoTheNightButAloneIsALeadIn() {
+    /// Decisions 73h/73i: a separate evening session (20:00–21:00), a block 21:30–22:30, the night
+    /// 23:00–07:00. Stitched, all three would be one night, with the block between two of its sessions,
+    /// before the last one's in-bed end, so 73i leaves it alone. The evening session and the night then
+    /// stitch exactly as without the block (more than 60 min apart, and the evening session is no
+    /// overnight sleep). Without the evening session the same block is a lead-in and is alone too.
+    func testABlockBetweenAnEveningSessionAndTheNightIsAlone() {
         let evening = session(1200, 1260), night = session(1380, 1860), doze = block(1290, 1350)
-        let bridged = Selection.nights(sessions: [evening, night], activityBlocks: [doze])
-        XCTAssertEqual(bridged.nights.map(\.window), [span(1200, 1860)])
-        XCTAssertEqual(bridged.nights.first?.inBedSpans, [span(1200, 1260), span(1290, 1350), span(1380, 1860)])
-        XCTAssertTrue(Selection.isOvernightSleep(bridged.nights[0]))
-        XCTAssertEqual(bridged.joinedBlocks, 1)
-        XCTAssertEqual(Selection.stitch([evening, night]).map(\.window), [span(1200, 1260), span(1380, 1860)],
-                       "without the block, the evening session stays apart")
+        let between = Selection.nights(sessions: [evening, night], activityBlocks: [doze])
+        XCTAssertEqual(between.nights, Selection.stitch([evening, night]))
+        XCTAssertEqual(between.nights.map(\.window), [span(1200, 1260), span(1380, 1860)])
+        XCTAssertEqual(between.joinedBlocks, 0)
+        XCTAssertEqual(between.aloneBlocks, 1)
 
         let leadIn = Selection.nights(sessions: [night], activityBlocks: [doze])
         XCTAssertEqual(leadIn.nights, [night])
         XCTAssertEqual(leadIn.aloneBlocks, 1)
     }
 
-    /// Decisions 73f/73g as a property, over a grid of session and block placements around one night:
+    /// Decision 73i: a block between two fragments of one night (A1 23:00–01:00, block 01:15–02:15, A2
+    /// 02:30–05:00) is alone, and the two records join by 71b exactly as without it; a block after A2
+    /// joins.
+    func testABlockBetweenTwoFragmentsOfOneNightIsAloneAndOneAfterTheLastJoins() {
+        let a1 = session(1380, 1500), a2 = session(1590, 1740)
+        let between = Selection.nights(sessions: [a1, a2], activityBlocks: [block(1515, 1575)])
+        XCTAssertEqual(between.nights, Selection.stitch([a1, a2]))
+        XCTAssertEqual(between.nights.map(\.window), [span(1380, 1740)])
+        XCTAssertEqual(between.aloneBlocks, 1)
+
+        let after = Selection.nights(sessions: [a1, a2], activityBlocks: [block(1515, 1575), block(1770, 1860)])
+        XCTAssertEqual(after.nights.map(\.window), [span(1380, 1860)])
+        XCTAssertEqual(after.nights.first?.inBedSpans, [span(1380, 1500), span(1590, 1740), span(1770, 1860)])
+        XCTAssertEqual(after.joinedBlocks, 1)
+        XCTAssertEqual(after.aloneBlocks, 1)
+    }
+
+    /// Decisions 73f/73g/73i as a property, over a grid of session and block placements around one night:
     /// every overnight sleep kept without blocks is covered by one kept with them, at least as wide; every
-    /// block is counted once; and every joined block starts at or after the in-bed end of a session of
-    /// its night.
+    /// block is counted once; and every joined block starts at or after the in-bed end of the LAST
+    /// session of its night (73i).
     func testBlocksNeverCostOrNarrowANightOverAGridOfPlacements() {
         let sessionSpots = [(1200, 1260), (1380, 1560), (1380, 1860), (1740, 1860), (1500, 1620), (2220, 2280), (1080, 1140)]
         let blockSpots = [(1100, 1160), (1290, 1350), (1320, 1370), (1590, 1650), (1620, 1720), (1870, 1900),
@@ -297,8 +312,9 @@ final class HelioActivitySleepTests: XCTestCase {
                 XCTAssertEqual(join.joinedBlocks + join.aloneBlocks, blocks.count, label)
                 for night in join.nights {
                     for block in blocks where night.segments.contains(block.segments[1]) {
-                        XCTAssertTrue(sessions.contains { holds(night, $0) && $0.window.end <= block.window.start },
-                                      "\(label): \(block.window) is after a session of its night")
+                        let lastEnd = sessions.filter { holds(night, $0) }.map(\.window.end).max()
+                        XCTAssertTrue(lastEnd.map { $0 <= block.window.start } ?? false,
+                                      "\(label): \(block.window) is after the last session of its night")
                     }
                 }
                 checked += 1
