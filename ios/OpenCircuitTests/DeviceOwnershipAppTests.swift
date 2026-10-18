@@ -1137,20 +1137,62 @@ extension DeviceOwnershipAppTests {
         XCTAssertEqual(health.count, 1)
     }
 
-    /// Review-224e S-2 (the rule stands): a sleep 61 min from the rest of its night isn't stitched and its
-    /// key holds the longer part. Since #231 it is a nap (§21.5: more than 60 min from the main sleep),
-    /// stored as one. A breadcrumb says it happened, with no time or length.
-    func testASleepOverAnHourFromItsNightIsKeptOutAndStoredAsANap() throws {
+    /// Decision 71b (#278), superseding review-224e S-2's split for this shape: a sleep 61 min from the
+    /// rest of its night, both overnight sleeps of one night key, is joined to it. One row with both
+    /// halves (240 + 179 asleep minutes), no nap, and no kept-out breadcrumb.
+    func testASleepOverAnHourFromItsNightJoinsItWhenBothAreOvernight() throws {
         let store = try makeStore()
         let observability = ObservabilityStore(defaults)
         let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
         _ = syncSessions([(-1, 3), (3 + 61.0 / 60, 7)], now: localHour(10), log: .strapOwnsAllTime, store: store,
                          breadcrumbs: breadcrumbs)
         let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
-        XCTAssertEqual(rows.map(\.asleepMin), [240], "the longer half keeps the night (the rule as decided)")
+        XCTAssertEqual(rows.map(\.asleepMin), [419], "one night with both halves (decision 71b)")
         let naps = try store.context.fetch(FetchDescriptor<StoredNap>())
-        XCTAssertEqual(naps.map(\.start), [localHour(4).addingTimeInterval(60)], "04:01–07:00")
-        XCTAssertEqual(naps.map(\.end), [localHour(7)])
+        XCTAssertEqual(naps.map(\.start), [], "no nap")
+        XCTAssertEqual(naps.map(\.end), [])
+        let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
+        XCTAssertEqual(lines, [])
+    }
+}
+
+// MARK: - Decision 71 (#278): overnight sleeps of one night join; every other sleep keeps the 60-min rule
+
+extension DeviceOwnershipAppTests {
+    private func storedNaps(_ store: LocalStore) throws -> [DateInterval] {
+        try store.context.fetch(FetchDescriptor<StoredNap>(sortBy: [SortDescriptor(\.start)])).map { DateInterval(start: $0.start, end: $0.end) }
+    }
+
+    /// 71c: around a night with a three-hour awakening (23:30–02:00, 05:00–07:00, one night), an evening
+    /// doze ending before midnight (20:30–22:00, 90 min before the night) and an afternoon sleep
+    /// (13:00–14:00) are naps exactly as before; neither part of the night is one.
+    func testAnEveningDozeAndAnAfternoonSleepStayNapsBesideAJoinedNight() throws {
+        let store = try makeStore()
+        _ = syncSessions([(-3.5, -2), (-0.5, 2), (5, 7), (13, 14)], now: localHour(16), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(try nightRows(store), ["-0.5…7.0 asleep=270"])
+        XCTAssertEqual(try storedNaps(store), [DateInterval(start: localHour(-3.5), end: localHour(-2)),
+                                               DateInterval(start: localHour(13), end: localHour(14))])
+    }
+
+    /// 71c: a sleep after the night whose midpoint is at or after 09:00 (07:30–11:00) is no overnight
+    /// sleep, so it is not joined, and once settled it is a nap, as before.
+    func testALateMorningSleepAfterTheNightIsStillANap() throws {
+        let store = try makeStore()
+        _ = syncSessions([(-1, 5), (7.5, 11)], now: localHour(12.5), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(try nightRows(store), ["-1.0…5.0 asleep=360"])
+        XCTAssertEqual(try storedNaps(store), [DateInterval(start: localHour(7.5), end: localHour(11))])
+    }
+
+    /// Review-224e S-2 where decision 71 doesn't reach: two overnight sleeps of one key whose join would
+    /// be longer than the longest night (15:00–03:00 and 05:00–11:30). The longer keeps the night, the
+    /// other is a nap, and the breadcrumb says so, as before.
+    func testOvernightSleepsTooLongToJoinStillSplitIntoANightAndANap() throws {
+        let store = try makeStore()
+        let observability = ObservabilityStore(defaults)
+        let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
+        _ = syncSessions([(-9, 3), (5, 11.5)], now: localHour(13), log: .strapOwnsAllTime, store: store, breadcrumbs: breadcrumbs)
+        XCTAssertEqual(try nightRows(store), ["-9.0…3.0 asleep=720"])
+        XCTAssertEqual(try storedNaps(store), [DateInterval(start: localHour(5), end: localHour(11.5))])
         let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
         XCTAssertEqual(lines, ["a strap sleep was kept out of its night (over 60 min from the night's longer part); stored as a nap (#231)"])
     }

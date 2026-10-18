@@ -222,6 +222,33 @@ public enum HelioSkinTemperatureGate {
             .sorted { $0.time < $1.time }
             .compactMap { minute in minute.celsius.map { QuantitySample(kind: .temperature, start: minute.time, value: $0) } }
     }
+
+    /// Decision 71i (#278): a strap night's nightly skin-temperature verdict, judged over its in-bed
+    /// spans (`HelioSleepSelection.Night.inBedSpans`), never over the awake gap of a joined night.
+    /// `SkinTempBaseline.nightlyVerdict` (shared with the ring, unchanged) over each span's hour-long
+    /// buckets: a reading counts in the first span that contains it, the count is over those
+    /// readings, and the coverage is the hit buckets over every span's buckets. One span (a night
+    /// that wasn't joined) is exactly `SkinTempBaseline.nightlyVerdict(samples:in:)` over it.
+    public static func nightlyVerdict(samples: [TemperatureSample], inBedSpans spans: [DateInterval],
+                                      minSamples: Int = SkinTempBaseline.minNightlySamples,
+                                      minCoverage: Double = SkinTempBaseline.minNightlyCoverage) -> SkinTempBaseline.NightlyVerdict {
+        guard spans.count > 1 else {
+            guard let span = spans.first else { return .notMeasured }
+            return SkinTempBaseline.nightlyVerdict(samples: samples, in: span, minSamples: minSamples, minCoverage: minCoverage)
+        }
+        var inSpans: [TemperatureSample] = []
+        var hit: Set<[Int]> = []
+        for sample in samples {
+            guard let index = spans.firstIndex(where: { $0.contains(sample.time) }) else { continue }
+            inSpans.append(sample)
+            hit.insert([index, Int(sample.time.timeIntervalSince(spans[index].start) / 3600)])
+        }
+        guard inSpans.count >= max(1, minSamples) else { return .notMeasured }
+        let buckets = spans.reduce(0) { $0 + max(1, Int(($1.duration / 3600).rounded(.up))) }
+        let coverage = Double(hit.count) / Double(buckets)
+        guard minCoverage <= 0 || coverage >= minCoverage else { return .rejectedCoverage(coverage) }
+        return .published(inSpans.map(\.celsius).reduce(0, +) / Double(inSpans.count))
+    }
 }
 
 // MARK: - Sleep-stage selection (decision 13)
@@ -263,6 +290,11 @@ public enum HelioSleepSelection {
             self.recordedTimeZone = recordedTimeZone
         }
 
+        /// Decision 71i (#278): the spans the night was in bed, one per fragment (`HelioSleepSelection
+        /// .inBedSpans(of:window:)`). The awake gap of a joined night is in none of them; a night that
+        /// wasn't joined has one, its window.
+        public var inBedSpans: [DateInterval] { HelioSleepSelection.inBedSpans(of: segments, window: window) }
+
         /// The calendar to judge this night in (decision 28e, review-224d S-2): the phone's calendar
         /// in the zone the night was RECORDED in, never the zone the phone is in at sync time.
         public var recordedCalendar: Calendar {
@@ -270,6 +302,18 @@ public enum HelioSleepSelection {
             if let recordedTimeZone { calendar.timeZone = recordedTimeZone }
             return calendar
         }
+    }
+
+    /// Decision 71i (#278): the in-bed spans of a strap night's `segments`, oldest first: its `.inBed`
+    /// segments (one per fragment, never overlapping, decision 70j), or `window` when it has none (a
+    /// row stored before decision 70). The strap-only readers that judge a night's time (the skin
+    /// temperature gate and verdict, the overnight HRV) take these, never the union window, whose
+    /// awake gap is no sleep.
+    public static func inBedSpans(of segments: [SleepSegment], window: DateInterval) -> [DateInterval] {
+        let spans = segments.filter { $0.stage == .inBed && $0.end > $0.start }
+            .map { DateInterval(start: $0.start, end: $0.end) }
+            .sorted { $0.start < $1.start }
+        return spans.isEmpty ? [window] : spans
     }
 
     /// The fixed-offset zone whose local midnight is `midnight` (the strap's own reference).
@@ -346,7 +390,50 @@ public enum HelioSleepSelection {
 
     /// Decision 28f (review-224d S-3): consecutive sessions this far apart or closer are one night.
     /// Amazfit's own rule: sleep more than 60 min from the main sleep is recorded as a nap.
+    ///
+    /// Decision 71 (#278): OpenCircuit joins two overnight sleeps of one night (`areOneNight`) whatever
+    /// the gap, so a long mid-night awakening no longer splits the night. This 60-min rule still decides
+    /// everything else (an evening doze, a daytime or late-morning sleep).
     public static let stitchGap: TimeInterval = 60 * 60
+
+    /// What `overnightVerdict` found: an overnight sleep (decision 71a), or which half of the gate it failed.
+    public enum OvernightVerdict: Equatable {
+        case overnight
+        /// Its midpoint is outside the night (`SleepWindow.isOvernightBlock`, decision 28c).
+        case notOvernight
+        /// It doesn't end in its key's wake window (`SleepNightKey.endsInWakeWindow`, decision 28d).
+        case endsOutsideWakeWindow
+    }
+
+    /// Decision 71a (#278): whether `night` is an overnight sleep: its own window passes
+    /// `SleepWindow.isOvernightBlock` (28c) AND ends in its key's wake window (28d), both judged in the
+    /// calendar it was recorded in (`Night.recordedCalendar`, 28e). The one gate for both the nights the
+    /// store keeps (`HelioStoreSink.storeNights`) and the same-night join in `stitch`.
+    public static func overnightVerdict(_ night: Night) -> OvernightVerdict {
+        let calendar = night.recordedCalendar
+        guard SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end, calendar: calendar) else {
+            return .notOvernight
+        }
+        guard SleepNightKey.endsInWakeWindow(night.window.end, calendar: calendar) else { return .endsOutsideWakeWindow }
+        return .overnight
+    }
+
+    /// Decision 71a: `overnightVerdict(night) == .overnight`.
+    public static func isOvernightSleep(_ night: Night) -> Bool {
+        overnightVerdict(night) == .overnight
+    }
+
+    /// The night key `night` files under (`SleepNightKey.night(inBedStart:inBedEnd:calendar:)` of its
+    /// own window), in the calendar it was recorded in.
+    public static func nightKey(of night: Night) -> Date {
+        SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end, calendar: night.recordedCalendar)
+    }
+
+    /// Decision 71b (#278): whether two sleeps are one night whatever the gap between them: both are
+    /// overnight sleeps (71a) and both file under the same night key.
+    public static func areOneNight(_ a: Night, _ b: Night) -> Bool {
+        isOvernightSleep(a) && isOvernightSleep(b) && nightKey(of: a) == nightKey(of: b)
+    }
 
     /// Every staged night in `sessions`, oldest first: each session's night (`night(from:now:)`), then
     /// `stitch`.
@@ -354,11 +441,18 @@ public enum HelioSleepSelection {
         stitch(sessions.compactMap { night(from: $0, now: now) })
     }
 
-    /// The single stitching rule (decision 28f), for anything that turns strap sleeps into nights or
-    /// naps: oldest first by their stages; a sleep whose STAGES overlap an earlier one's is dropped (the
-    /// strap re-delivers sessions on an overlapping fetch); sleeps `stitchGap` or less apart become ONE
-    /// (their segments stay exactly as reported, and the gap between them stays a gap: no segment is
-    /// invented for it), unless the result would exceed `maxNightLength`.
+    /// The single stitching rule (decisions 28f and 71b), for anything that turns strap sleeps into
+    /// nights or naps: oldest first by their stages; a sleep whose STAGES overlap an earlier one's is
+    /// dropped (the strap re-delivers sessions on an overlapping fetch); the next sleep joins the night
+    /// accumulated so far when the two are `stitchGap` or less apart (28f), OR when both are overnight
+    /// sleeps of the same night key (`areOneNight`, 71b: a long mid-night awakening, whatever its
+    /// length), unless the joined window would exceed `maxNightLength`. Joined, their segments stay
+    /// exactly as reported, and the gap between them stays a gap: no segment is invented for it.
+    ///
+    /// The join is judged on the ACCUMULATED night against the next sleep, so a night of three
+    /// fragments is one night even when its first fragment alone is no overnight sleep (it ends before
+    /// midnight). A first fragment that ends before midnight and is more than `stitchGap` from the next
+    /// is still not joined (decision 71, a known gap).
     ///
     /// Decision 70j (review-311 B1): the duplicate is judged on the stage spans, never on the in-bed
     /// `window`. A session's record span can reach into its neighbour's (a lead-in, a trailing end), and
@@ -369,8 +463,8 @@ public enum HelioSleepSelection {
         for night in sleeps.sorted(by: { stageSpan(of: $0).start < stageSpan(of: $1).start }) {
             if let last = out.last, stageSpan(of: last).end > stageSpan(of: night).start { continue }
             if let last = out.last,
-               night.window.start.timeIntervalSince(last.window.end) <= stitchGap,
-               night.window.end.timeIntervalSince(last.window.start) <= maxNightLength {
+               night.window.end.timeIntervalSince(last.window.start) <= maxNightLength,
+               night.window.start.timeIntervalSince(last.window.end) <= stitchGap || areOneNight(last, night) {
                 out[out.count - 1] = stitched(last, night)
                 continue
             }
@@ -466,7 +560,8 @@ public enum HelioSleepSelection {
 
     /// §21.5 step 3: a sleep more than this from the main sleep is a nap; one this close or closer
     /// belongs to the main sleep. The same 60 minutes as `stitchGap`, so a sleep `stitch` keeps apart
-    /// from its own night is always far enough from it.
+    /// from its own night is always far enough from it. An overnight sleep of the night's own key is
+    /// never kept apart from it (decision 71b), so it is never judged here as a nap.
     public static let napGap: TimeInterval = stitchGap
 
     /// §21.5 step 2: the main-sleep window, as hours of the recorded local day: 00:00–08:00, what the
@@ -503,7 +598,9 @@ public enum HelioSleepSelection {
 
     /// §21.5: which of `sleeps` are naps.
     ///
-    /// 1. The sleeps are stitched first (`stitch`, 28f): sessions 60 min or less apart are one sleep.
+    /// 1. The sleeps are stitched first (`stitch`): sessions 60 min or less apart are one sleep (28f),
+    ///    and so are overnight sleeps of one night key whatever the gap (decision 71b, #278), so of two
+    ///    overnight sleeps of one night neither is a nap. Every other sleep keeps the 60-min rule.
     /// 2. A main sleep is a known one (`mainSleeps`: the nights already stored, by either device), or,
     ///    for a day whose main-sleep window (`mainSleepHours` of the day, in the zone the sleep was
     ///    recorded in) no known main sleep overlaps, the longest of these sleeps that overlaps it.

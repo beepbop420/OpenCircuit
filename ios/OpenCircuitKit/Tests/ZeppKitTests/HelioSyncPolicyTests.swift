@@ -265,7 +265,8 @@ final class HelioSleepSelectionTests: XCTestCase {
     }
 
     /// Decision 28f: sessions 60 min or less apart are one night; their segments stay as reported and
-    /// the gap stays a gap. More than 60 min apart, they stay two.
+    /// the gap stays a gap. More than 60 min apart, they stay two, unless both are overnight sleeps of
+    /// one night key (decision 71b): then they are one night whatever the gap.
     func testSessionsAnHourOrLessApartAreStitchedIntoOneNight() throws {
         let first = sessionRecord(stages: [(1380, 1500, 0x04), (1500, 1620, 0x05)])   // 23:00–03:00
         let second = sessionRecord(stages: [(1650, 1740, 0x08), (1740, 1860, 0x04)])  // 03:30–07:00
@@ -280,7 +281,15 @@ final class HelioSleepSelectionTests: XCTestCase {
         let exactlyAnHour = sessionRecord(stages: [(1680, 1860, 0x04)])                // 04:00–07:00
         XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([first, exactlyAnHour]), now: now).count, 1)
         let moreThanAnHour = sessionRecord(stages: [(1681, 1860, 0x04)])               // 04:01–07:00
-        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([first, moreThanAnHour]), now: now).count, 2,
+        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([first, moreThanAnHour]), now: now).count, 1,
+                       "two overnight sleeps of one night key are one night whatever the gap (decision 71b)")
+
+        // The 60-min edge, where one side is no overnight sleep: an evening doze ending before midnight.
+        let night = sessionRecord(stages: [(1380, 1860, 0x04)])                        // 23:00–07:00
+        let dozeAnHourBefore = sessionRecord(stages: [(1200, 1320, 0x04)])             // 20:00–22:00
+        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([dozeAnHourBefore, night]), now: now).count, 1)
+        let dozeOverAnHourBefore = sessionRecord(stages: [(1200, 1319, 0x04)])         // 20:00–21:59
+        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([dozeOverAnHourBefore, night]), now: now).count, 2,
                        "more than 60 min from the main sleep is a separate sleep (Amazfit's nap rule)")
     }
 
@@ -392,11 +401,17 @@ final class HelioNapRuleTests: XCTestCase {
     }
 
     /// §21.5 step 2: of two sleeps in the main-sleep window, the longer is the main sleep; the other,
-    /// more than 60 min from it, is a nap.
+    /// more than 60 min from it, is a nap. Decision 71b: two overnight sleeps of one night key are one
+    /// sleep, so neither is a nap; the rule still holds where one of them is no overnight sleep.
     func testOfTwoSleepsInTheMainWindowTheLongerIsTheNight() {
         let split = naps([sleep(-1, 2), sleep(3.5, 7.5)], now: 10)
-        XCTAssertEqual(split.mainSleeps.map(\.window), [span(3.5, 7.5)])
-        XCTAssertEqual(split.naps.map(\.window), [span(-1, 2)])
+        XCTAssertEqual(split.mainSleeps.map(\.window), [span(-1, 7.5)])
+        XCTAssertEqual(split.naps.map(\.window), [])
+
+        // 07:30–11:30 has its midpoint after 09:00: no overnight sleep, so not joined, and the longer.
+        let late = naps([sleep(1, 3), sleep(7.5, 11.5)], now: 13)
+        XCTAssertEqual(late.mainSleeps.map(\.window), [span(7.5, 11.5)])
+        XCTAssertEqual(late.naps.map(\.window), [span(1, 3)])
     }
 
     /// A night delivered while it is still going on (§21.4) is the day's main sleep, never a nap.
@@ -426,13 +441,14 @@ final class HelioNapRuleTests: XCTestCase {
                        "60 min after it ended, it is a nap")
     }
 
-    /// Every sleep lands in exactly one bucket, and the main sleeps are never naps.
+    /// Every sleep lands in exactly one bucket, and the main sleeps are never naps. 08:30–08:36 is an
+    /// overnight sleep of the night's key, so it is part of the night (decision 71b).
     func testEverySleepIsJudgedOnce() {
         let sleeps = [sleep(-4, -2.5), sleep(-1, 7), sleep(8.5, 8.6), sleep(13, 14), sleep(17, 18)]
         let split = naps(sleeps, now: 18.5)
         let all = split.naps + split.mainSleeps + split.nearMainSleep + split.tooShort + split.unsettled
-        XCTAssertEqual(Set(all.map(\.window)), Set(sleeps.map(\.window)))
-        XCTAssertEqual(all.count, sleeps.count)
+        XCTAssertEqual(Set(all.map(\.window)), [span(-4, -2.5), span(-1, 8.6), span(13, 14), span(17, 18)])
+        XCTAssertEqual(all.count, sleeps.count - 1)
         XCTAssertEqual(split.naps.map(\.window), [span(-4, -2.5), span(13, 14)])
     }
 

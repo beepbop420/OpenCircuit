@@ -1,6 +1,7 @@
 import Foundation
 import OpenCircuitKit
 import SwiftData
+import ZeppKit
 
 // Scoring the Helio Strap's nights on the phone — #246, decision 48.
 //
@@ -65,7 +66,9 @@ extension LocalStore {
         let scores = StoredNightScore.scores(.init(
             segments: segments,
             heartRate: helioHeartRate(in: window, device: device),
-            rmssd: helioRMSSD(in: window, device: device),
+            // Decision 71i: the HRV of the night's in-bed spans, never of a joined night's awake gap.
+            rmssd: helioRMSSD(in: window, sleepSpans: HelioSleepSelection.inBedSpans(of: segments, window: window),
+                              device: device),
             // The verdict the caller just reached for THIS night (0 = none or withheld), so the
             // score and the stored temperature always describe the same judgement.
             skinTempC: extras.skinTempC > 0 ? extras.skinTempC : nil,
@@ -155,6 +158,10 @@ extension LocalStore {
         var scored: [Date] = []
         for row in targets {
             let window = DateInterval(start: row.inBedStart, end: row.inBedEnd)
+            let segments = SleepHypnogramCodec.decode(row.hypnogramData)
+            // Decision 71i: the same in-bed spans the save path judges (one, the window, for a night
+            // that wasn't joined or was stored before decision 70).
+            let sleepSpans = HelioSleepSelection.inBedSpans(of: segments, window: window)
             let needsSleep = row.sleepScore == 0
             let scores: StoredNightScore.Scores
             if needsSleep {
@@ -164,9 +171,9 @@ extension LocalStore {
                     .prefix(Self.helioScoreBaselineNights)
                     .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.celsius) }
                 scores = StoredNightScore.scores(.init(
-                    segments: SleepHypnogramCodec.decode(row.hypnogramData),
+                    segments: segments,
                     heartRate: helioHeartRate(in: window, device: nil),
-                    rmssd: helioRMSSD(in: window, device: nil),
+                    rmssd: helioRMSSD(in: window, sleepSpans: sleepSpans, device: nil),
                     skinTempC: row.skinTempC > 0 ? row.skinTempC : nil,
                     priorNights: priorNights))
             } else {
@@ -175,6 +182,7 @@ extension LocalStore {
                 // fetch and the baseline are skipped.
                 let rmssd = sharedHRV
                     .filter { $0.start >= window.start && $0.start < window.end }
+                    .filter { sample in sleepSpans.contains { $0.start <= sample.start && sample.start < $0.end } }
                     .map { Int($0.value.rounded()) }
                     .filter { $0 > 0 }
                 scores = StoredNightScore.scores(.init(segments: [], rmssd: rmssd))
@@ -235,9 +243,12 @@ extension LocalStore {
     }
 
     /// The strap's HRV readings inside `window`, in ms, taken as RMSSD (decision 44, 🟡 — see the
-    /// file header). Stored as `.hrvSDNN` because that is the app's only HRV kind.
-    private func helioRMSSD(in window: DateInterval, device: SyncDeviceID?) -> [Int] {
+    /// file header). Stored as `.hrvSDNN` because that is the app's only HRV kind. Only readings in
+    /// `sleepSpans` (the night's in-bed spans, half-open like the window) count: a joined night's
+    /// awake gap is no sleep (decision 71i). A night that wasn't joined has one span, its window.
+    private func helioRMSSD(in window: DateInterval, sleepSpans: [DateInterval], device: SyncDeviceID?) -> [Int] {
         helioRows(kind: .hrvSDNN, in: window, device: device)
+            .filter { sample in sleepSpans.contains { $0.start <= sample.start && sample.start < $0.end } }
             .map { Int($0.value.rounded()) }
             .filter { $0 > 0 }
     }
