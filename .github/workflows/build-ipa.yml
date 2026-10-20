@@ -14,14 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-15-intel]
+        os: [macos-26, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Velg nyeste Xcode
         run: |
-          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_2*.app | grep -viE "beta|_2[7-9]" | sort -V | tail -1)
           sudo xcode-select -s "$XC"
           xcodebuild -version
           echo "::notice::$(xcodebuild -version | head -1) paa ${{ matrix.os }}"
