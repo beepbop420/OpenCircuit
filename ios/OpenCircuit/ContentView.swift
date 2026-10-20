@@ -186,7 +186,7 @@ struct ContentView: View {
         if case .connected = scanner.state { return true } else { return false }
     }
 
-    var body: some View {
+    private var bodyBase: some View {
         // Five-tab bottom navigation. Each tab wraps its own NavigationStack; the app-level lifecycle
         // (launch tasks, foreground refresh, Health flush, alerts, battery, onboarding) is attached to
         // the TabView below so it runs regardless of which tab is active — exactly once, not per tab.
@@ -298,6 +298,11 @@ struct ContentView: View {
                 }) {
                 OnboardingView { onboardingCompleted = true }
             }
+    }
+
+    // Split in three so older Xcode type-checks the long modifier chain in time.
+    private var bodyMiddle: some View {
+        bodyBase
             .task {
                 // Register the headache-feature defaults once per launch, so a raw
                 // `UserDefaults.bool(forKey:)`/`integer(forKey:)` read outside an `@AppStorage`
@@ -419,6 +424,10 @@ struct ContentView: View {
                     maybeAutoSyncOnReady()
                 }
             }
+    }
+
+    var body: some View {
+        bodyMiddle
             .sheet(isPresented: $showCalibration, onDismiss: {
                 Task { await calibration.refreshLatestEstimateIfNeeded(minInterval: 2) }
             }) {
