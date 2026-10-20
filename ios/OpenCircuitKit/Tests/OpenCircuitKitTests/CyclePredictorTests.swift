@@ -138,8 +138,8 @@ final class CyclePredictorTests: XCTestCase {
         let p2 = CyclePredictor.PeriodEntry(start: daysAgo(0))
         let pred = CyclePredictor.predict(from: [p1, p2])!
 
-        let expectedOvulation = cal.startOfDay(for: pred.nextPeriodStart)
-            .addingTimeInterval(-Double(CyclePredictor.lutealPhaseDays) * 86_400)
+        let expectedOvulation = cal.date(byAdding: .day, value: -CyclePredictor.lutealPhaseDays,
+                                         to: cal.startOfDay(for: pred.nextPeriodStart))!
         XCTAssertEqual(cal.startOfDay(for: pred.ovulationEstimate), expectedOvulation)
         XCTAssertEqual(cal.startOfDay(for: pred.fertileWindowEnd), expectedOvulation,
                        "fertileWindowEnd == ovulation day")
@@ -150,8 +150,8 @@ final class CyclePredictorTests: XCTestCase {
         let p2 = CyclePredictor.PeriodEntry(start: daysAgo(0))
         let pred = CyclePredictor.predict(from: [p1, p2])!
 
-        let expectedStart = cal.startOfDay(for: pred.ovulationEstimate)
-            .addingTimeInterval(-Double(CyclePredictor.fertileWindowDaysBeforeOvulation) * 86_400)
+        let expectedStart = cal.date(byAdding: .day, value: -CyclePredictor.fertileWindowDaysBeforeOvulation,
+                                     to: cal.startOfDay(for: pred.ovulationEstimate))!
         XCTAssertEqual(cal.startOfDay(for: pred.fertileWindowStart), expectedStart)
     }
 

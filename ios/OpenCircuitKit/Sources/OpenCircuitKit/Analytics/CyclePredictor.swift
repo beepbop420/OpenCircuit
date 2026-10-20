@@ -140,13 +140,13 @@ public enum CyclePredictor {
     /// Periods are sorted by start internally; inter-period intervals outside
     /// `[minCycleLengthDays, maxCycleLengthDays]` are excluded as likely errors.
     /// Returns `nil` when fewer than `minPeriodsForPrediction` valid cycles exist.
-    public static func cycleStats(from periods: [PeriodEntry]) -> CycleStats? {
+    public static func cycleStats(from periods: [PeriodEntry], calendar: Calendar = .current) -> CycleStats? {
         let sorted = periods.sorted { $0.start < $1.start }
         guard sorted.count >= minPeriodsForPrediction else { return nil }
 
         var intervals: [Double] = []
         for i in 1 ..< sorted.count {
-            let days = sorted[i].start.timeIntervalSince(sorted[i - 1].start) / 86_400
+            let days = wallClockDays(from: sorted[i - 1].start, to: sorted[i].start, calendar: calendar)
             if days >= Double(minCycleLengthDays) && days <= Double(maxCycleLengthDays) {
                 intervals.append(days)
             }
@@ -158,7 +158,7 @@ public enum CyclePredictor {
         // Average period duration — only from entries with both start and end.
         let completedDurations: [Double] = sorted.compactMap { e in
             guard let end = e.end else { return nil }
-            let d = end.timeIntervalSince(e.start) / 86_400
+            let d = wallClockDays(from: e.start, to: end, calendar: calendar)
             return (d >= 1 && d <= 10) ? d : nil   // sanity: 1–10 day periods
         }
         let avgDuration = completedDurations.isEmpty ? nil
@@ -183,35 +183,39 @@ public enum CyclePredictor {
     public static func predict(
         from periods: [PeriodEntry],
         skinTempDeviations: [(night: Date, offsetC: Double)] = [],
-        now: Date = Date()
+        now: Date = Date(),
+        calendar: Calendar = .current
     ) -> CyclePrediction? {
-        guard let stats = cycleStats(from: periods) else { return nil }
+        guard let stats = cycleStats(from: periods, calendar: calendar) else { return nil }
         let sorted = periods.sorted { $0.start < $1.start }
         guard let lastPeriod = sorted.last else { return nil }
 
-        let cycleInterval = stats.avgCycleLengthDays * 86_400
+        // Every offset below is in calendar days (`adding(days:to:calendar:)`), not 86 400 s: across a
+        // daylight-saving change a seconds offset from midnight lands at 23:00 the day before, which
+        // put the predicted period, ovulation and fertile window a day early on the calendar.
+        let cycleDays = stats.avgCycleLengthDays
         // One cycle after the last LOGGED period — then roll forward by whole cycles until it
         // is in the future, so a user who stopped logging for ≥1 cycle still sees the NEXT
         // period (and a future fertile/ovulation window) rather than a date already elapsed.
-        var nextStart = lastPeriod.start.addingTimeInterval(cycleInterval)
-        if cycleInterval > 0 {
-            while nextStart < now { nextStart = nextStart.addingTimeInterval(cycleInterval) }
+        var nextStart = adding(days: cycleDays, to: lastPeriod.start, calendar: calendar)
+        if cycleDays > 0 {
+            while nextStart < now { nextStart = adding(days: cycleDays, to: nextStart, calendar: calendar) }
         }
 
         let durationDays = stats.avgPeriodDurationDays ?? 5.0   // default 5 days
-        let nextEnd = nextStart.addingTimeInterval(durationDays * 86_400)
+        let nextEnd = adding(days: durationDays, to: nextStart, calendar: calendar)
 
         // Ovulation = predicted next period start − luteal phase (14 days).
-        let ovulation = nextStart.addingTimeInterval(-Double(lutealPhaseDays) * 86_400)
+        let ovulation = adding(days: -Double(lutealPhaseDays), to: nextStart, calendar: calendar)
         // Fertile window: 5 days before ovulation up to and including ovulation day.
-        let fertileStart = ovulation.addingTimeInterval(-Double(fertileWindowDaysBeforeOvulation) * 86_400)
+        let fertileStart = adding(days: -Double(fertileWindowDaysBeforeOvulation), to: ovulation, calendar: calendar)
 
         // Skin-temp corroboration: look for ≥ tempRiseNightsRequired nights with
         // offsetC ≥ tempRiseCorroborationC in a ±3-day window around predicted ovulation.
         // "temperature fluctuations may affect the accuracy of the prediction" (APK).
         // This is labeled as a SOFT signal — it cannot confirm ovulation occurred.
-        let corrobWindowStart = ovulation.addingTimeInterval(-3 * 86_400)
-        let corrobWindowEnd   = ovulation.addingTimeInterval( 3 * 86_400)
+        let corrobWindowStart = adding(days: -3, to: ovulation, calendar: calendar)
+        let corrobWindowEnd   = adding(days: 3, to: ovulation, calendar: calendar)
         let risingNights = skinTempDeviations.filter {
             $0.night >= corrobWindowStart
             && $0.night <= corrobWindowEnd
@@ -228,6 +232,31 @@ public enum CyclePredictor {
             avgCycleLengthDays: stats.avgCycleLengthDays,
             tempCorroborated:   corroborated
         )
+    }
+
+    // MARK: Calendar-day arithmetic
+
+    /// Days from `start` to `end` as the wall clock counts them: whole calendar days between their
+    /// local midnights plus the difference in time of day. A 28-day gap that spans a daylight-saving
+    /// change is 28, not 27.96 or 28.04.
+    static func wallClockDays(from start: Date, to end: Date, calendar: Calendar) -> Double {
+        let startDay = calendar.startOfDay(for: start)
+        let endDay = calendar.startOfDay(for: end)
+        guard let whole = calendar.dateComponents([.day], from: startDay, to: endDay).day else {
+            return end.timeIntervalSince(start) / 86_400
+        }
+        let timeOfDay = end.timeIntervalSince(endDay) - start.timeIntervalSince(startDay)
+        return Double(whole) + timeOfDay / 86_400
+    }
+
+    /// `date` moved by `days` calendar days (whole days by the calendar, a fractional rest in seconds).
+    static func adding(days: Double, to date: Date, calendar: Calendar) -> Date {
+        let whole = days.rounded(.down)
+        let rest = (days - whole) * 86_400
+        guard let moved = calendar.date(byAdding: .day, value: Int(whole), to: date) else {
+            return date.addingTimeInterval(days * 86_400)
+        }
+        return moved.addingTimeInterval(rest)
     }
 
     // MARK: Day-classification helpers
