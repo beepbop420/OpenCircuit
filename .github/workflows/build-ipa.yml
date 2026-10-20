@@ -10,7 +10,12 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Prover baade ARM- og Intel-Mac samtidig, den som faar maskin forst vinner.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,5 +65,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenCircuit-ipa
+          name: OpenCircuit-ipa-${{ matrix.os }}
           path: ios/OpenCircuit.ipa
