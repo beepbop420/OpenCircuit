@@ -24,6 +24,7 @@ jobs:
           XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
           sudo xcode-select -s "$XC"
           xcodebuild -version
+          echo "::notice::$(xcodebuild -version | head -1) paa ${{ matrix.os }}"
 
       - name: Generer prosjekt (hvis XcodeGen brukes)
         working-directory: ios
@@ -55,7 +56,14 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" != "0" ]; then
+            # Legg feilene som annotations, saa de kan leses uten aa laste ned loggen
+            grep -E "error:|fatal error|xcodebuild: error|requires Xcode" build.log | sort -u | head -10 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+            tail -5 build.log | while IFS= read -r l; do echo "::warning::${l:0:900}"; done
+            exit "$RC"
+          fi
 
           APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
           echo "App: $APP"
