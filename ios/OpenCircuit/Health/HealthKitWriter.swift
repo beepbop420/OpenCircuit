@@ -1,6 +1,7 @@
 import Foundation
 import HealthKit
 import OpenCircuitKit
+import SwiftData
 import ZeppKit
 
 // Writes ring metrics into Apple Health. Type/unit choices follow
@@ -736,8 +737,8 @@ final class HealthKitWriter {
         // Pre-fetch HR samples for the 32-day basal-energy lookback — the widest window needed
         // by both resting HR and passive-calorie flushes. Fetched once and shared so we don't
         // query LocalStore twice for overlapping ranges (#172 review, fix #2).
-        let basalHR = Self.prefetchHRSamples(local: store, lookbackDays: Self.basalRHRLookbackDays,
-                                              now: Date())
+        let basalHR = await Self.prefetchHRSamples(local: store, lookbackDays: Self.basalRHRLookbackDays,
+                                                    now: Date())
 
         // Derived daily resting HR — one sample per finalized day (#18, #37). Idempotency is a
         // UserDefaults day-watermark, NOT the store cursor: RHR isn't a stored sample, and the
@@ -1705,15 +1706,31 @@ final class HealthKitWriter {
     /// Pre-fetch HR samples from LocalStore for a given lookback, returning mapped HRSamples.
     /// Called once per flush cycle; the result is shared across `flushRestingHR` and
     /// `flushPassiveCalories` to avoid redundant LocalStore queries (#172 review, fix #2).
+    ///
+    /// Read off the main actor on its own `ModelContext`, as `TrendsData.loadAsync` and `DayTimeline`
+    /// do: 32 days of minute HR is tens of thousands of rows, and materialising them on the main
+    /// context after every sync froze the UI for as long as the fetch took. A background context sees
+    /// only saved rows, so with unsaved main-context changes this falls back to the main-context read.
     private static func prefetchHRSamples(local: LocalStore, lookbackDays: Int,
-                                           now: Date) -> [HRSample] {
+                                           now: Date) async -> [HRSample] {
         let cal = Calendar.current
         let from = cal.date(byAdding: .day, value: -lookbackDays, to: cal.startOfDay(for: now))
             ?? now.addingTimeInterval(-Double(lookbackDays) * 86_400)
         // Decision 28: only HR recorded by the device that owned its time feeds derived values.
-        guard let stored = try? local.ownedSamples(kind: .heartRate, from: from, to: now),
-              !stored.isEmpty else { return [] }
-        return stored.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        guard !local.context.hasChanges else {
+            guard let stored = try? local.ownedSamples(kind: .heartRate, from: from, to: now),
+                  !stored.isEmpty else { return [] }
+            return stored.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        }
+        let container = local.container
+        let log = LocalStore.ownershipLog()
+        return await Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            guard let stored = try? LocalStore.ownedSamples(in: context, kind: .heartRate, from: from,
+                                                            to: now, log: log),
+                  !stored.isEmpty else { return [] }
+            return stored.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        }.value
     }
 
     /// Write one resting-HR sample per finalized day not yet covered by the day-watermark, skipping a

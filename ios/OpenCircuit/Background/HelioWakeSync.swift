@@ -26,6 +26,16 @@ import UIKit
 
 /// Decision 33's rules for when a wake syncs, pure so they test without CoreBluetooth or UIKit.
 enum HelioWakePolicy {
+    /// A catch-up's run budget from what is left of its assertion: the full `defaultTimeout` at most,
+    /// less a margin for the alert passes that follow the run. A fixed 28 s inside a ~30 s assertion
+    /// left the alerts no time, so iOS expired the assertion and the round was acked `03 09` unsaved.
+    static let afterRunReserve: TimeInterval = 4
+    static let minimumCatchUp: TimeInterval = 10
+    @MainActor static func catchUpTimeout(backgroundTimeRemaining: TimeInterval) -> TimeInterval {
+        min(RingBackgroundSyncService.defaultTimeout,
+            max(minimumCatchUp, backgroundTimeRemaining - afterRunReserve))
+    }
+
     /// N: a background reconnect (or restoration relaunch) catches up only when the last completed strap
     /// sync is at least this old. A strap that briefly leaves range (a shower, another room) reconnects
     /// many times a day, and syncing on each would cost the strap's battery and the app's background
@@ -283,8 +293,10 @@ extension HelioWakeCoordinator.Environment {
                     connection.breadcrumbs.wakeNote(wake, "no store yet (before the first unlock?); not syncing")
                     return nil
                 }
+                let timeout = HelioWakePolicy.catchUpTimeout(
+                    backgroundTimeRemaining: UIApplication.shared.backgroundTimeRemaining)
                 return await HelioBackgroundSyncService.live(store: store).run(
-                    kind: HelioWakePolicy.kind(for: wake), timeout: RingBackgroundSyncService.defaultTimeout, wake: wake)
+                    kind: HelioWakePolicy.kind(for: wake), timeout: timeout, wake: wake)
             },
             expire: { connection.tearDownForExpiry() },
             afterRun: { run in await HelioWakeCoordinator.afterRun?(run) },

@@ -195,6 +195,9 @@ public struct ZeppChunkReassembler {
         }
 
         guard var current = partial else { return events }
+        // Released before the append so `current.body` is uniquely referenced and grows in place;
+        // every path below either stores it back or leaves the slot empty.
+        partial = nil
         guard Int(index) == current.nextIndex else {
             partial = nil
             events.append(.dropped(.chunkIndexGap(expected: UInt8(truncatingIfNeeded: current.nextIndex),

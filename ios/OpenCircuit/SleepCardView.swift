@@ -1412,12 +1412,13 @@ struct SleepCardView: View {
         // Shared overnight-mean helper — the SAME computation the Vitals HRV/RR rows use, so the
         // two surfaces can't disagree (HRV "86 in Vitals vs 64 in Sleep" was a point-vs-mean clash).
         let window = DateInterval(start: start, end: end)
+        // One pass over the query (this runs in `body`, over ~3 days of minute rows), not one per kind.
+        var pointsByKind: [String: [OvernightAverages.Point]] = [:]
+        for row in recentVitals {
+            pointsByKind[row.kindRaw, default: []].append(OvernightAverages.Point(value: row.value, start: row.start))
+        }
         func mean(_ kind: MetricKind) -> Double? {
-            let raw = kind.rawValue
-            let points = recentVitals
-                .filter { $0.kindRaw == raw }
-                .map { OvernightAverages.Point(value: $0.value, start: $0.start) }
-            return OvernightAverages.mean(points, window: window)
+            OvernightAverages.mean(pointsByKind[kind.rawValue] ?? [], window: window)
         }
         let hr = mean(.heartRate).map { Int($0.rounded()) }
         let hrv = mean(.hrvSDNN).map { Int($0.rounded()) }
