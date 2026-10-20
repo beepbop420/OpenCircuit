@@ -6,7 +6,7 @@ on:
       scheme:
         description: "Scheme (la staa tom for automatisk valg)"
         required: false
-        default: ""
+        default: "OpenCircuit"
 
 jobs:
   build:
@@ -41,7 +41,7 @@ jobs:
           echo "Prosjekt: $PROJ"
           xcodebuild -list -project "$PROJ"
 
-          SCHEME="${{ github.event.inputs.scheme }}"
+          SCHEME="${{ github.event.inputs.scheme || 'OpenCircuit' }}"
           if [ -z "$SCHEME" ]; then
             SCHEME=$(xcodebuild -list -json -project "$PROJ" | python3 -c "
           import json,sys
