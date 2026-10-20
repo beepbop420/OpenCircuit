@@ -1,0 +1,64 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "Scheme (la staa tom for automatisk valg)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Velg nyeste Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Generer prosjekt (hvis XcodeGen brukes)
+        working-directory: ios
+        run: |
+          if [ -f project.yml ]; then
+            brew install xcodegen
+            xcodegen generate
+          fi
+
+      - name: Bygg app uten signering
+        working-directory: ios
+        run: |
+          PROJ=$(find . -maxdepth 2 -name "*.xcodeproj" -not -path "*/OpenCircuitKit/*" | head -1)
+          echo "Prosjekt: $PROJ"
+          xcodebuild -list -project "$PROJ"
+
+          SCHEME="${{ github.event.inputs.scheme }}"
+          if [ -z "$SCHEME" ]; then
+            SCHEME=$(xcodebuild -list -json -project "$PROJ" | python3 -c "
+          import json,sys
+          s=json.load(sys.stdin)['project']['schemes']
+          s=[x for x in s if 'Kit' not in x and 'Test' not in x] or s
+          print(s[0])")
+          fi
+          echo "Scheme: $SCHEME"
+
+          xcodebuild -project "$PROJ" -scheme "$SCHEME" \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry OpenCircuit.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenCircuit-ipa
+          path: ios/OpenCircuit.ipa
