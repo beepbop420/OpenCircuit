@@ -29,6 +29,19 @@ struct RingBackgroundSyncService {
     /// makes a real background HR lock LIKELY when it runs, not guaranteed for daytime.
     static let processingTimeout: TimeInterval = 150
 
+    /// Of a run's budget, what the capture leaves for the post-capture Health flush (the strap's
+    /// background run reserves the same). `timeout` bounds the WHOLE run: before this, the capture
+    /// alone got the full 28 s after the pre-flush, so pre-flush + capture + flush overran the
+    /// ~30 s app-refresh window whenever the drain used its budget, and iOS expired the task.
+    static let flushReserve: TimeInterval = 8
+    /// The capture never gets less than this, even when the pre-flush ran long.
+    static let minimumCapture: TimeInterval = 8
+
+    /// The capture's share of a run that started at `runStart` with budget `timeout`.
+    static func captureBudget(timeout: TimeInterval, runStart: Date, now: Date) -> TimeInterval {
+        max(minimumCapture, timeout - now.timeIntervalSince(runStart) - flushReserve)
+    }
+
     /// One bounded background read so the app already has last night's data on open. The
     /// drain inside `captureForBackground` persists overnight HR/HRV/SpO2 + sleep + steps +
     /// skin temp to the local store (the dashboard's source) — skin temp ONLY during the
@@ -41,6 +54,7 @@ struct RingBackgroundSyncService {
                     allowLivePoll: Bool = true,
                     sleepFinalized: Bool = false,
                     forceHistoryDrain: Bool = false) async throws -> Bool {
+        let runStart = Date()
         let scanner = RingScanner.shared
         scanner.setLocalStore(store)   // RingSession auto-persists the drained history + temp
 
@@ -65,7 +79,8 @@ struct RingBackgroundSyncService {
             if preMirrored { ObservabilityStore().recordHealthWrite() }
         }
 
-        let capture = await scanner.captureForBackground(timeout: timeout, allowLivePoll: allowLivePoll,
+        let captureTimeout = Self.captureBudget(timeout: timeout, runStart: runStart, now: Date())
+        let capture = await scanner.captureForBackground(timeout: captureTimeout, allowLivePoll: allowLivePoll,
                                                          forceHistoryDrain: forceHistoryDrain)
         // Resolve the night window for this connect so temp frames are gated correctly even
         // on a fresh background session that never ran the reactive refresh. This CANNOT be

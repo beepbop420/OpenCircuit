@@ -188,6 +188,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private static func handle(_ task: BGTask, kind: TaskRecord.Kind, timeout: TimeInterval) {
         let scheduler = BackgroundRefreshScheduler()
         let observability = ObservabilityStore()
+        let completion = BackgroundTaskCompletion(task)
         // Breadcrumb the INSTANT iOS invokes us, before any async work — so "iOS never woke us" (no
         // such line) is distinguishable from "woke us but the drain didn't finish" (this line with no
         // matching sync outcome below). This is the single record that answers "does ANY background
@@ -228,7 +229,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     await Self.evaluateAlerts()
                     scheduler.schedule()
                     scheduler.scheduleProcessing()
-                    task.setTaskCompleted(success: false)
+                    completion.complete(success: false)
                     return
                 }
                 let service = RingBackgroundSyncService(
@@ -268,7 +269,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                                       restingHRDaily: restingHRDaily)
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
-                task.setTaskCompleted(success: synced)
+                completion.complete(success: synced)
             } catch {
                 guard !Task.isCancelled else { return }
                 observability.recordSyncOutcome(kind: kind, success: false,
@@ -276,18 +277,28 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 await Self.evaluateAlerts()
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
-                task.setTaskCompleted(success: false)
+                completion.complete(success: false)
             }
         }
 
         task.expirationHandler = {
+            // Like the strap's: the cancelled capture still needs a main-actor turn to tear its session
+            // down and re-arm the standing connect (`captureForBackground`'s defer). Completing the task
+            // in this handler let iOS suspend the app before that ran, stranding a half-drained link.
             operation.cancel()
-            observability.recordSyncOutcome(kind: kind, success: false, detail: "iOS ended the task early")
-            scheduler.schedule()
-            scheduler.scheduleProcessing()
-            task.setTaskCompleted(success: false)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(Self.ringExpiryGrace))
+                guard completion.complete(success: false) else { return }
+                observability.recordSyncOutcome(kind: kind, success: false, detail: "iOS ended the task early")
+                scheduler.schedule()
+                scheduler.scheduleProcessing()
+            }
         }
     }
+
+    /// How long after iOS expires a ring run the task is completed anyway: room for the cancelled
+    /// capture's teardown and standing-connect re-arm, which run on the next main-actor turns.
+    private static let ringExpiryGrace: TimeInterval = 2
 
     /// How long after iOS expires a strap run the task is completed anyway, if the run hasn't done it
     /// (a Health save still in flight). The run's own teardown needs about `teardownGrace`.

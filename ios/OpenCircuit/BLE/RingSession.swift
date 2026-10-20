@@ -59,6 +59,10 @@ final class RingSession: NSObject {
     /// `didDisconnect`) and stamps the persisted last live reading with when it was REALLY
     /// measured — not `Date()`, which would push a minutes-old reading into HealthKit "now".
     private(set) var lastFrameAt: Date?
+    /// `lastFrameAt`'s resolution (see the notification handler).
+    private static let frameStampResolution: TimeInterval = 1
+    /// When `ReminderDefaults.lastRingDataAt` was last written from a data frame.
+    @ObservationIgnored private var lastRingDataPersistedAt: Date?
     private(set) var monitoring = false
     /// True while a WORKOUT owns the live-HR link. Set via `beginWorkoutHR()`. Suppresses the
     /// periodic auto-measure (see `idleForAutoMeasure`) so a concurrent measure can't call
@@ -433,6 +437,8 @@ final class RingSession: NSObject {
     /// BLE wake on their own, but the channel opens, the 3 s quiet tail, and finalize + Health
     /// flush have no BLE traffic — without this, iOS can suspend us mid-commit.
     private var drainAssertion: UIBackgroundTaskIdentifier = .invalid
+    /// Held across `deliverBackgroundResults` (Health flush + alerts), separately from the drain's.
+    private var deliverAssertion: UIBackgroundTaskIdentifier = .invalid
     private var drainTraces: [HistoryChannelTrace] = []
     /// Sleep-vitals records THIS drain pulled on a non-sleep channel — a night handed to the all-day
     /// channel (Gen 3 FR05.011, 2026-09-28). Feeds `HistoryCommitGate`'s grow-only restage.
@@ -893,16 +899,34 @@ final class RingSession: NSObject {
     /// Clear the capture buffer + its persisted copy.
     func clearDiagnosticsCapture() {
         historyCapture.clear()
+        diagnosticsCaptureDirty = false
         UserDefaults.standard.removeObject(forKey: historyCaptureKey)
     }
     /// Record one raw frame when capture is on and the opcode is one we triage. Persists per-ring so a
     /// BACKGROUND overnight drain survives relaunch. Cheap no-op (UserDefaults bool read) when disabled.
+    ///
+    /// The buffer (up to 1500 frames) is persisted at most every `diagnosticsPersistInterval` and when
+    /// a sync finalizes: re-encoding the whole capture into UserDefaults on EVERY history page made a
+    /// drain quadratic on the main thread for anyone with capture on.
     private func recordDiagnosticFrameIfEnabled(_ bytes: [UInt8]) {
         guard diagnosticsCaptureEnabled, historyCapture.recordIfRelevant(bytes) else { return }
+        diagnosticsCaptureDirty = true
+        let now = Date()
+        if let last = diagnosticsPersistedAt, now.timeIntervalSince(last) < Self.diagnosticsPersistInterval { return }
+        persistDiagnosticsCaptureIfDirty(now: now)
+    }
+
+    private func persistDiagnosticsCaptureIfDirty(now: Date = Date()) {
+        guard diagnosticsCaptureDirty else { return }
+        diagnosticsCaptureDirty = false
+        diagnosticsPersistedAt = now
         if let data = try? JSONEncoder().encode(historyCapture) {
             UserDefaults.standard.set(data, forKey: historyCaptureKey)
         }
     }
+    @ObservationIgnored private var diagnosticsCaptureDirty = false
+    @ObservationIgnored private var diagnosticsPersistedAt: Date?
+    private static let diagnosticsPersistInterval: TimeInterval = 10
 
     init(peripheral: CBPeripheral, localStore: LocalStore? = nil) {
         self.peripheral = peripheral
@@ -3897,6 +3921,19 @@ final class RingSession: NSObject {
         drainAssertion = .invalid
     }
 
+    private func beginDeliverAssertion() {
+        endDeliverAssertion()
+        deliverAssertion = UIApplication.shared.beginBackgroundTask(withName: "ring.history.deliver") { [weak self] in
+            MainActor.assumeIsolated { self?.endDeliverAssertion() }
+        }
+    }
+
+    private func endDeliverAssertion() {
+        guard deliverAssertion != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(deliverAssertion)
+        deliverAssertion = .invalid
+    }
+
     /// A drain that ran while backgrounded delivers its own results (#119). For BLE-wake drains
     /// (`trigger != nil`) that means the Health flush the foreground would have done, plus an
     /// attributed Diagnostics record ("Last background run" finally means something). BGTask
@@ -3904,6 +3941,11 @@ final class RingSession: NSObject {
     /// flush and record. EVERY background drain gets a shot at the morning notification; it's
     /// per-night deduped, so whichever path lands the finished night first posts it.
     private func deliverBackgroundResults(trigger: String?) async {
+        // Its own assertion: the drain's may already have expired on a long morning drain (the 0x4c
+        // page wakes carried the drain itself), and without one iOS suspends the app mid-flush, leaving
+        // the night in the store but not in Health until the next wake.
+        beginDeliverAssertion()
+        defer { endDeliverAssertion() }
         if let trigger {
             let epochs = drainCountsByLabel.values.reduce(0, +)
             var wrote = false
@@ -3925,7 +3967,7 @@ final class RingSession: NSObject {
             // just-committed store batch. Placed OUTSIDE the HealthKit-available guard: alerts post
             // local notifications and are independent of Health-mirror authorization. The evaluator's
             // quiet-hours gate + per-notification `lastFired` backoff dedupe any overlap with the
-            // BGTask path, and the whole await is covered by the surrounding drain assertion.
+            // BGTask path, and the whole await is covered by the deliver assertion taken above.
             if let localStore {
                 // #183: freeze today's overnight-signals row FIRST, so the alert pass right below
                 // reads a row computed from THIS drain rather than one lagging a sync. The engine is
@@ -4602,6 +4644,7 @@ final class RingSession: NSObject {
 
     private func finalizeSync() {
         guard syncing else { return }
+        persistDiagnosticsCaptureIfDirty()
         if bulkRecords.isEmpty {
             // An empty poll (the periodic cadence fires even with nothing un-synced) brings no new
             // epochs — nothing to stitch. Stamp the cadence clock and finalize WITHOUT re-staging /
@@ -4961,7 +5004,14 @@ extension RingSession: CBPeripheralDelegate {
                 return
             }
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
-            self.lastFrameAt = Date()   // freshness anchor for staleness + last-reading timestamp (#36)
+            // Freshness anchor for staleness + last-reading timestamp (#36). Re-stamped at most once a
+            // second: a history drain delivers dozens of frames a second, and every write invalidated
+            // each view reading `liveReadingsStale` (the vitals cards) at that rate. Staleness is
+            // judged over 30 s and up, so a second of resolution changes nothing it decides.
+            let frameAt = Date()
+            if self.lastFrameAt.map({ frameAt.timeIntervalSince($0) >= Self.frameStampResolution }) ?? true {
+                self.lastFrameAt = frameAt
+            }
             self.recordDiagnosticFrameIfEnabled(bytes)   // diagnostics capture (#111) — no-op when off
             // Raw capture for the activity-channel probe (#93/#99-style RE) — every inbound frame,
             // any opcode, while a probe is in flight. Format matches the desktop `decode-log` text
@@ -4982,8 +5032,13 @@ extension RingSession: CBPeripheralDelegate {
                 // Durable "last ring data received" timestamp for the wear reminder (#84): a real
                 // data frame proves the ring is worn/streaming. Persisted (unlike the in-memory
                 // `lastFrameAt`) so a cold foreground doesn't falsely fire "put your ring back on".
-                UserDefaults.standard.set(Date().timeIntervalSince1970,
-                                          forKey: ReminderDefaults.lastRingDataAt)
+                // At most once a minute (the reminder works in hours, and it also reads the live
+                // `lastFrameAt`), not on every frame of a drain.
+                if self.lastRingDataPersistedAt.map({ frameAt.timeIntervalSince($0) >= 60 }) ?? true {
+                    self.lastRingDataPersistedAt = frameAt
+                    UserDefaults.standard.set(frameAt.timeIntervalSince1970,
+                                              forKey: ReminderDefaults.lastRingDataAt)
+                }
             }
             // Frames arriving while the link isn't `ready` mean discovery didn't land on this
             // (restored) reconnect — re-run it so we can ack and the buttons enable. #reconnect
@@ -5015,7 +5070,7 @@ extension RingSession: CBPeripheralDelegate {
                 // path lastFrameAt was just set to now (line ~689), so sampleDate ≈ ingest time — this
                 // picks the correct day for the row/persist + display re-read, but it cannot back-date
                 // steps actually taken at 23:59 onto the prior day (no per-step timestamps on the wire).
-                let sampleDate = self.lastFrameAt ?? Date()
+                let sampleDate = frameAt   // this frame's arrival (`lastFrameAt` is stamped at 1 s resolution)
                 // The day test, the rollover's nil previous sample and the next baseline all live in
                 // the tested `StepAccumulator.read` (#199). What stays here, and is reviewed by eye
                 // only (the app suite cannot host a CoreBluetooth wiring test): the store write when

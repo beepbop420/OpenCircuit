@@ -494,27 +494,27 @@ final class HelioSession: WearableSession {
             if !isAuthenticated { tierZeroHeartRateSeen = true }
             heartRateObserver?(measurement.beatsPerMinute, now)
         case .chunkedRead, .chunkedWrite:
-            guard var link else { return }
-            let out = link.receive(bytes)
-            self.link = link
+            // Mutated in place, not through a `guard var` copy: a copy shares the reassembly buffer's
+            // storage with `self.link`, so every append would copy the whole message so far (CoW).
+            guard link != nil else { return }
+            let out = link!.receive(bytes)
             handle(out)
         case .activityControl:
-            guard var fetch else {
+            guard fetch != nil else {
                 if !within(Self.replyWindow, of: lastFetchProgressAt, now: now) { onEvent(.strapNotification(.activityControl)) }
                 return
             }
             lastFetchProgressAt = now
-            let actions = fetch.receiveControl(bytes)
-            self.fetch = fetch
+            let actions = fetch!.receiveControl(bytes)
             perform(actions)
         case .activityData:
-            guard var fetch else {
+            guard fetch != nil else {
                 if !within(Self.replyWindow, of: lastFetchProgressAt, now: now) { onEvent(.strapNotification(.activityData)) }
                 return
             }
             lastFetchProgressAt = now
-            let actions = fetch.receiveData(bytes)
-            self.fetch = fetch
+            // In place (see `.chunkedRead`): a copy made the round buffer's every append O(round size).
+            let actions = fetch!.receiveData(bytes)
             perform(actions)
         case .currentTime:
             break

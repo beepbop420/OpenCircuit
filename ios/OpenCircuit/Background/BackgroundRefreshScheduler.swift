@@ -29,13 +29,16 @@ struct BackgroundRefreshScheduler {
     private let scheduler: BGTaskScheduling
     private let now: () -> Date
     private let window: (Date) -> DateInterval?
+    private let pendingDefaults: UserDefaults
 
     init(scheduler: BGTaskScheduling = BGTaskScheduler.shared,
          now: @escaping () -> Date = Date.init,
-         window: @escaping (Date) -> DateInterval? = BackgroundRefreshScheduler.defaultWindow) {
+         window: @escaping (Date) -> DateInterval? = BackgroundRefreshScheduler.defaultWindow,
+         pendingDefaults: UserDefaults = .standard) {
         self.scheduler = scheduler
         self.now = now
         self.window = window
+        self.pendingDefaults = pendingDefaults
     }
 
     /// Tonight's (or the in-progress) sleep window from the manual/default schedule
@@ -98,9 +101,45 @@ struct BackgroundRefreshScheduler {
         submit(makeRequest(), cancelIdentifier: Self.identifier, label: "refresh")
     }
 
+    /// Submit the processing request, unless the one already pending aims at about the same time or
+    /// earlier. This runs at the start and end of every run and every time the app leaves the front;
+    /// resubmitting each time pushed `earliestBeginDate` an hour out again, so an app opened (or
+    /// refreshed) more often than hourly kept its only long background window from ever coming due.
     @discardableResult
     func scheduleProcessing() -> Bool {
-        submit(makeProcessingRequest(), cancelIdentifier: Self.processingIdentifier, label: "processing")
+        let request = makeProcessingRequest()
+        let aim = request.earliestBeginDate ?? now()
+        if Self.keepsPendingProcessing(pending: pendingProcessingAim(), newAim: aim, now: now()) {
+            return true
+        }
+        let submitted = submit(request, cancelIdentifier: Self.processingIdentifier, label: "processing")
+        if submitted {
+            pendingDefaults.set(aim, forKey: Self.pendingProcessingAimKey)
+            pendingDefaults.set(Self.currentBuild, forKey: Self.pendingProcessingBuildKey)
+        } else {
+            pendingDefaults.removeObject(forKey: Self.pendingProcessingAimKey)
+        }
+        return submitted
+    }
+
+    /// When the processing request this app last submitted comes due. Only trusted from the same
+    /// build: an update may not keep pending requests, and resubmitting once costs nothing.
+    private func pendingProcessingAim() -> Date? {
+        guard pendingDefaults.string(forKey: Self.pendingProcessingBuildKey) == Self.currentBuild else { return nil }
+        return pendingDefaults.object(forKey: Self.pendingProcessingAimKey) as? Date
+    }
+
+    /// Keep the pending request when it is still in the future and the new aim is no earlier and less
+    /// than one `processingInterval` later (a morning aim at bedtime is further, and replaces it).
+    static func keepsPendingProcessing(pending: Date?, newAim: Date, now: Date) -> Bool {
+        guard let pending, pending > now else { return false }
+        return newAim >= pending && newAim.timeIntervalSince(pending) < processingInterval
+    }
+
+    static let pendingProcessingAimKey = "bg.processing.pendingAim.v1"
+    static let pendingProcessingBuildKey = "bg.processing.pendingAimBuild.v1"
+    private static var currentBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
     }
 
     /// The Helio Strap only (#233 item 5): the next app-refresh request at `date`, at least a minute

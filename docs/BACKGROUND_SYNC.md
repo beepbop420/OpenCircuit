@@ -312,6 +312,26 @@ strap sync's wake reason (`sync start wake=…`). Bounded per 12-hour window: 20
 lines, 12 strap-message lines (4 per endpoint), so one night uses at most 48 of the metric log's 400
 entries; what's over budget is counted and reported on the next window's first line.
 
+### B.6 Run budgets and completion (Oct 2026)
+
+Why runs "ended early" instead of finishing, and what each budget is now. Still no `audio` mode (B.2):
+these make the legitimate wakes we already get finish their work.
+
+- **Ring app-refresh:** `syncVitals(timeout:)` bounds the WHOLE run. The capture gets
+  `timeout − elapsed − flushReserve` (8 s, floor 8 s; `RingBackgroundSyncService.captureBudget`), so
+  pre-flush + capture + flush fits the ~30 s window. Before, the capture alone got 28 s after the
+  pre-flush.
+- **Ring expiry:** the BGTask is completed `ringExpiryGrace` (2 s) after expiry unless the run
+  completes first (`BackgroundTaskCompletion`, as the strap's), so the cancelled capture's teardown and
+  standing-connect re-arm run before iOS suspends us.
+- **Ring wake-drain delivery:** `deliverBackgroundResults` holds its own assertion
+  (`ring.history.deliver`); the drain's may have expired on a long morning drain.
+- **Processing request:** `scheduleProcessing()` keeps a pending request that comes due no later than
+  one interval before the new aim, instead of cancel + resubmit on every run and backgrounding (which
+  kept pushing the only long window an hour out). Trusted per build only.
+- **Strap wake catch-up:** budget = `min(28 s, backgroundTimeRemaining − 4 s)`, floor 10 s
+  (`HelioWakePolicy.catchUpTimeout`), leaving the alert passes room inside the assertion.
+
 ---
 
 ## Part C — On-device validation runbook

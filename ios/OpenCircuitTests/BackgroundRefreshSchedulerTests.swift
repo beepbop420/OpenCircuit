@@ -117,11 +117,56 @@ final class BackgroundRefreshSchedulerTests: XCTestCase {
         XCTAssertEqual(request.earliestBeginDate?.timeIntervalSince1970, aimed.timeIntervalSince1970)
         XCTAssertEqual(processing.earliestBeginDate?.timeIntervalSince1970, aimed.timeIntervalSince1970)
     }
+
+    /// The processing request is resubmitted only when it would come due later than an hour after the
+    /// pending one, or the pending one has passed: every run start and app backgrounding used to push
+    /// it an hour out again, so an app used more than hourly never reached its long window.
+    func testAPendingProcessingRequestIsNotPushedBackByLaterSchedules() throws {
+        let suite = "BackgroundRefreshSchedulerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let recording = RecordingScheduler()
+        var now = Date(timeIntervalSince1970: 3_000_000)
+        let scheduler = BackgroundRefreshScheduler(scheduler: recording, now: { now },
+                                                   window: { _ in nil }, pendingDefaults: defaults)
+
+        XCTAssertTrue(scheduler.scheduleProcessing())
+        let first = try XCTUnwrap(recording.submitted?.earliestBeginDate)
+        XCTAssertEqual(first, now.addingTimeInterval(BackgroundRefreshScheduler.processingInterval))
+
+        now = now.addingTimeInterval(20 * 60)
+        XCTAssertTrue(scheduler.scheduleProcessing())
+        XCTAssertEqual(recording.submitCount, 1, "the pending request stays")
+        XCTAssertEqual(recording.submitted?.earliestBeginDate, first)
+
+        now = first.addingTimeInterval(60)   // it came due (and ran): the next is submitted
+        XCTAssertTrue(scheduler.scheduleProcessing())
+        XCTAssertEqual(recording.submitCount, 2)
+        XCTAssertEqual(recording.submitted?.earliestBeginDate,
+                       now.addingTimeInterval(BackgroundRefreshScheduler.processingInterval))
+    }
+
+    func testKeepsPendingProcessingRules() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let pending = now.addingTimeInterval(30 * 60)
+        XCTAssertFalse(BackgroundRefreshScheduler.keepsPendingProcessing(pending: nil, newAim: pending, now: now))
+        XCTAssertFalse(BackgroundRefreshScheduler.keepsPendingProcessing(pending: now.addingTimeInterval(-1),
+                                                                         newAim: pending, now: now), "passed")
+        XCTAssertTrue(BackgroundRefreshScheduler.keepsPendingProcessing(pending: pending,
+                                                                        newAim: now.addingTimeInterval(3_600), now: now))
+        XCTAssertFalse(BackgroundRefreshScheduler.keepsPendingProcessing(pending: pending,
+                                                                         newAim: now.addingTimeInterval(60), now: now),
+                       "an earlier aim replaces it")
+        XCTAssertFalse(BackgroundRefreshScheduler.keepsPendingProcessing(pending: pending,
+                                                                         newAim: pending.addingTimeInterval(3_600), now: now),
+                       "a morning aim an hour or more later replaces it")
+    }
 }
 
 private final class RecordingScheduler: BGTaskScheduling {
     private(set) var cancelledIdentifier: String?
     private(set) var submitted: BGTaskRequest?
+    private(set) var submitCount = 0
 
     func register(forTaskWithIdentifier identifier: String,
                   using queue: DispatchQueue?,
@@ -135,5 +180,6 @@ private final class RecordingScheduler: BGTaskScheduling {
 
     func submit(_ taskRequest: BGTaskRequest) throws {
         submitted = taskRequest
+        submitCount += 1
     }
 }
