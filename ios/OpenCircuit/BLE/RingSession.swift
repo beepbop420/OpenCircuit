@@ -461,7 +461,7 @@ final class RingSession: NSObject {
     /// `adoptedRecordCount` credit, which `commitDrainedRecords` CONSUMES — this one survives for
     /// reporting, since the log row is written after the commit.
     private(set) var lastAdoptedRecordCount = 0
-    private var activeDrainTrace: HistoryChannelTrace?
+    @ObservationIgnored private var activeDrainTrace: HistoryChannelTrace?
     private var historySyncTrigger = "foreground"
 
     /// One-shot resume hint (#reconnect): `RingScanner.teardownSession(capturingResumeHint:)` reads
@@ -486,14 +486,16 @@ final class RingSession: NSObject {
         return HistoryDrainPlan.Step(channel: trace.channel, label: trace.label)
     }
 
-    private var bulkRecords: [BulkRecord] = []
+    // Drain-hot internal state below is `@ObservationIgnored`: no view reads it, and through the
+    // observation registrar every per-page append went through its get/set pair, copying the array.
+    @ObservationIgnored private var bulkRecords: [BulkRecord] = []
     private var bulkFinalized = false    // captured pages already committed (sleep/vitals) — stop-time safety net skips re-commit
     private var didRestageFromArchive = false   // once-per-session: surface retained-but-unstaged archive epochs (#119)
     private var dailyStepsTotal = 0      // cached display total for the last sample day (mirrors StoredDaily)
     private var syncTask: Task<Void, Never>?
     private var syncDone = false        // 0x50 end-of-history seen
-    private var syncQuietTicks = 0      // seconds since the last page arrived
-    private var drainSawPage = false    // a 0x47/0x4c page arrived since last check (live-enter drain)
+    @ObservationIgnored private var syncQuietTicks = 0      // seconds since the last page arrived
+    @ObservationIgnored private var drainSawPage = false    // a 0x47/0x4c page arrived since last check (live-enter drain)
     private var drainDone = false       // 0x50 end-of-history seen during live-enter drain
 
     // MARK: Unattributed history pages (#188) — "if we ACK it, we KEEP it"
@@ -585,7 +587,7 @@ final class RingSession: NSObject {
     /// sync AFTER the `0x50` end-of-history — so we collect regardless of the `syncing` flag
     /// (gating on it would drop a burst that lands once the drain loop has exited) and finalize via
     /// a debounce timer once frames stop arriving.
-    private var osaFrames: [[UInt8]] = []
+    @ObservationIgnored private var osaFrames: [[UInt8]] = []
     private var osaDebounceTask: Task<Void, Never>?
     private var osaDecoding = false      // a burst decode is in flight — serializes finalize
     private var osaHitCap = false        // logged-once guard for the frame cap
@@ -808,7 +810,7 @@ final class RingSession: NSObject {
     /// Throttle for the half-open-link recovery (`rediscoverIfNeeded`).
     private var lastDiscoveryKick: Date?
     private var localStore: LocalStore?
-    private var syncSession = EpochSyncSession()
+    @ObservationIgnored private var syncSession = EpochSyncSession()
     /// Intentionally false: 0x47 is a diagnostic-only perfusion trend (not pulse-resolution),
     /// so the Layer-A epoch stream is never routed into stored samples (see PPGTrend.swift, PROTOCOL.md §5.2).
     private let epochDecodingEnabled = false
@@ -1568,7 +1570,11 @@ final class RingSession: NSObject {
             let dayStart = Calendar.current.startOfDay(for: Date())
             nightWindow = DateInterval(start: dayStart, end: dayStart.addingTimeInterval(6 * 3600))
         }
-        nightWindowRefreshedAt = Date()
+        // A locked phone can't read the Health sleep schedule, so a fallback window resolved while
+        // locked is only trusted for 5 minutes, not the usual 30: the first look after unlock gets
+        // the real schedule instead of a guessed drain gate.
+        let lockedFallback = !nightWindowIsExplicit && !UIApplication.shared.isProtectedDataAvailable
+        nightWindowRefreshedAt = lockedFallback ? Date().addingTimeInterval(-25 * 60) : Date()
         if let w = nightWindow {
             // Surface the resolved window + the effective DRAIN-gate end so a device-log pull can tell
             // whether a late morning drain is the temp-margin (fixed here) or an over-counted learned
