@@ -8,13 +8,16 @@ on:
         required: false
         default: "OpenCircuit"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     # Prover baade ARM- og Intel-Mac samtidig, den som faar maskin forst vinner.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-15, macos-26]
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -76,3 +79,13 @@ jobs:
         with:
           name: OpenCircuit-ipa-${{ matrix.os }}
           path: ios/OpenCircuit.ipa
+
+      - name: Publiser som release (direkte nedlasting)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_id }}"
+          gh release create "$TAG" ios/OpenCircuit.ipa -R "$GITHUB_REPOSITORY" \
+            --title "OpenCircuit (usignert IPA)" \
+            --notes "Usignert IPA bygget fra master. Installer med SideStore." \
+            --latest

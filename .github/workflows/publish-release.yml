@@ -1,0 +1,39 @@
+name: Publiser IPA som release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID paa bygg-kjoringen som har IPA-artefakten"
+        required: true
+      artifact:
+        description: "Navn paa artefakten"
+        required: false
+        default: "OpenCircuit-ipa-macos-15"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact }}
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: out
+
+      - name: Lag release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la out
+          TAG="build-${{ github.event.inputs.run_id }}"
+          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" out/OpenCircuit.ipa -R "$GITHUB_REPOSITORY" \
+            --title "OpenCircuit (usignert IPA)" \
+            --notes "Usignert IPA bygget fra master. Installer med SideStore." \
+            --latest
